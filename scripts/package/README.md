@@ -7,15 +7,15 @@ should still verify by hand.
 
 | File | Target | Verified here? |
 |---|---|---|
-| `windows-release.sh` | Windows `Runyx.exe`+zip | Build verified (sandbox cross-compile + a real `windows-release` GitHub Actions run); never actually run — see below |
+| `windows-release.sh` | Windows `Runyx.exe`+zip | Build verified (sandbox cross-compile + a real `windows-release` GitHub Actions run); never actually run on Windows itself |
+| `runyx.iss` | Windows installer (`Runyx-<version>-Installer.exe`, Inno Setup) | **Yes** — built, silently installed, launched, and silently uninstalled for real on a native `windows-latest` GitHub Actions runner (`windows-installer` job); never run on this sandbox (no Windows/Wine here) — see below |
 | `linux-release.sh` + `nfpm.yaml` | `.deb` / Arch Linux package / tarball | **Yes** — built, installed via `dpkg -i`, and actually launched under Xvfb on this sandbox; see below |
 | `PKGBUILD` | Arch/AUR (from-source build) | No `makepkg`/Arch machine here, but builds the exact same `-tags guinative` binary the nfpm Arch package above does, which *was* run |
-| `macos-release.sh` | macOS `Runyx.app`+zip | Not run in this sandbox (no macOS); runs for real in CI's `darwin-release` job on GitHub's own `macos-13`/`macos-14` runners — see below |
+| `macos-release.sh` | macOS `Runyx.app`+zip, `Runyx-<version>-Installer-<arch>.pkg` | Not run in this sandbox (no macOS); the `.app` *and* the `.pkg` installer are both built and the `.pkg` is actually installed via `installer -pkg` for real in CI's `darwin-release` job, on GitHub's own `macos-13`/`macos-14` runners — see below |
 | `runyx.rb` | Homebrew (macOS/Linux) | No — no brew in this sandbox |
 | `nfpm.yaml` (.rpm) | `.rpm` | No — not built here, same tool as the verified `.deb`/Arch targets above so likely to work, but unverified |
 | `winget-manifest.yaml` | Windows winget | No — submission is a PR to microsoft/winget-pkgs |
 | `Dockerfile` | Docker image | No — no Docker daemon in this sandbox |
-| `runyx.iss` | Windows installer (Inno Setup) | No — no Windows/Wine/`iscc` in this sandbox |
 
 ## Linux desktop app
 
@@ -52,29 +52,36 @@ one-line pkg-config shim rather than patching the vendored dependency.
 
 ## Windows desktop app
 
-## Windows desktop app
+`windows-release.sh` cross-compiles `Runyx.exe` from Linux: a native
+WebView2 window compiled in (cgo + `gcc-mingw-w64-x86-64`/
+`g++-mingw-w64-x86-64`, which this sandbox installed to prove this),
+the `-H=windowsgui` linker flag (no console flash on double-click), the
+mascot icon embedded as a PE resource (`cmd/runyx/icon_windows.syso`,
+generated from `assets/mascot/svg/runyx-mascot-idle-dark.svg` via
+`rsvg-convert` + ImageMagick + `windres`), and the version baked in via
+`-ldflags`. Verified in this sandbox: the script runs end to end and
+produces a valid PE32+ GUI-subsystem binary with the icon resource
+present (checked with `wrestool -l`).
 
-`windows-release.sh` cross-compiles the real Windows deliverable from
-Linux: `Runyx.exe` with a native WebView2 window compiled in (cgo +
-`gcc-mingw-w64-x86-64`/`g++-mingw-w64-x86-64`, which this sandbox
-installed to prove this), the `-H=windowsgui` linker flag (no console
-flash on double-click), the mascot icon embedded as a PE resource
-(`cmd/runyx/icon_windows.syso`, generated from
-`assets/mascot/svg/runyx-mascot-idle-dark.svg` via `rsvg-convert` +
-ImageMagick + `windres`), and the version baked in via `-ldflags`.
-Verified in this sandbox: the script runs end to end and produces a
-valid PE32+ GUI-subsystem binary with the icon resource present
-(checked with `wrestool -l`); `go test -race ./...` passes with
-`internal/guiwindow`'s fallback-chain logic and `cmd/runyx`'s
-single-instance/daemon-reuse logic unit tested. **Not verified**: the
-binary was never actually run, since there's no Windows machine or
-Wine here — see `docs/MANUAL_TESTS.md`'s Windows desktop app section
-for what a human needs to check on real hardware, including the full
-offline flight-test.
-
-`runyx.iss` is an Inno Setup script for an optional installer (Start
-Menu entry, optional desktop shortcut, no-admin-required install). Not
-built here — needs `iscc` on Windows or under Wine.
+`runyx.iss` (Inno Setup) is the real installer -- `Runyx-<version>-
+Installer.exe`, which a user double-clicks, clicks through a short
+wizard (Start Menu entry, optional desktop shortcut, no admin rights
+required since Runyx is portable-by-default), and ends with Runyx
+installed and optionally launched. **This is actually built and
+verified, just not in this sandbox**: `.github/workflows/ci.yml`'s
+`windows-installer` job runs on a native `windows-latest` GitHub
+Actions runner (not a cross-compile -- real Windows, mingw-w64 and
+Inno Setup installed via Chocolatey), builds `Runyx.exe` there
+directly, compiles `runyx.iss` with `ISCC.exe` into the real installer
+executable, then **silently installs it** (`/VERYSILENT`), confirms
+`Runyx.exe` landed where Inno Setup put it and actually runs
+(`Runyx.exe version`), **silently uninstalls it**, and confirms it's
+gone -- a full real install/uninstall round trip on genuine Windows,
+automated, on every push. Not run interactively by a human anywhere
+yet -- see `docs/MANUAL_TESTS.md`'s Windows desktop app section for
+what still needs eyes on a real screen (the wizard UI itself, the
+Start Menu/desktop shortcuts actually opening the app, the full
+offline flight-test).
 
 ## macOS desktop app
 
@@ -84,7 +91,12 @@ compiler needed or possible for this combination, since a cgo build
 targeting Cocoa only works compiled natively on macOS), a real
 `.icns` generated the standard way (`sips` + `iconutil`) from
 `assets/mac/icon-1024.png` (the mascot SVG rasterized at 1024px), and
-an `Info.plist` with the bundle identifier/version/icon wired up.
+an `Info.plist` with the bundle identifier/version/icon wired up. It
+then wraps that `.app` into **the real installer**: a `Runyx-<version>-
+Installer-<arch>.pkg`, built with `pkgbuild` (Xcode command line
+tools, no extra dependency), targeting `/Applications` -- a user
+double-clicks it, macOS's own Installer.app runs, and Runyx ends up
+installed, same shape as the Windows Inno Setup installer above.
 
 Not run in this sandbox at all -- there's no macOS here, and unlike
 Windows' mingw-w64 there is no practical way to cross-compile a cgo
@@ -92,13 +104,16 @@ Cocoa/WebKit binary from Linux (would need a full macOS SDK + osxcross
 setup, fragile and not attempted). Instead,
 `.github/workflows/ci.yml`'s `darwin-release` job runs this script on
 two of GitHub's own macOS runners (`macos-13`, an Intel machine, and
-`macos-14`, Apple Silicon), each building and uploading its native
-`Runyx.app` as a real CI artifact -- genuine macOS hardware/VMs doing
-the actual build, the strongest verification available without a Mac
-in hand. See `docs/MANUAL_TESTS.md` for what a human still needs to
-check by actually opening the built `.app` (first-launch Gatekeeper
-prompt since it's unsigned/unnotarized, the window itself, offline
-behavior).
+`macos-14`, Apple Silicon), building the `.app` and the `.pkg`
+natively, then **actually installs the `.pkg`** with macOS's own
+`installer -pkg ... -target /` command-line tool, confirms
+`Runyx.app` landed in `/Applications` and runs (`Runyx version`), and
+removes it again -- a real install round trip on genuine macOS
+hardware/VMs, automated, on every push; the strongest verification
+available without a Mac in hand. See `docs/MANUAL_TESTS.md` for what a
+human still needs to check by actually opening the installed `.app`
+(first-launch Gatekeeper prompt since it's unsigned/unnotarized, the
+window itself, offline behavior).
 
 ## Portable mode
 

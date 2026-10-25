@@ -21,6 +21,17 @@ mkdir -p "$OUT_DIR"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# pkgbuild's --version (and Apple's own CFBundleVersion convention)
+# expects a dotted-numeric-ish string; a free-form CI version like
+# "ci-<sha>" isn't one. Same digit-led stand-in approach as
+# linux-release.sh's PKG_VERSION, for the same reason: the package's
+# own version metadata needs this, while the binary itself still
+# reports the original VERSION via -ldflags/CFBundleVersion below.
+case "$VERSION" in
+  [0-9]*) PKG_VERSION="$VERSION" ;;
+  *) PKG_VERSION="0.0.0" ;;
+esac
+
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LDFLAGS="-X github.com/furaxdev/runyx/internal/version.Version=$VERSION -X github.com/furaxdev/runyx/internal/version.Commit=$COMMIT -X github.com/furaxdev/runyx/internal/version.BuildDate=$BUILD_DATE"
@@ -89,7 +100,21 @@ EOF
 ARCHIVE_NAME="runyx-darwin-$GOARCH_BUILD.zip"
 (cd "$WORK_DIR" && zip -qry "$OUT_DIR/$ARCHIVE_NAME" Runyx.app)
 
-(cd "$OUT_DIR" && sha256sum "$ARCHIVE_NAME" 2>/dev/null >> SHA256SUMS.txt || shasum -a 256 "$ARCHIVE_NAME" >> SHA256SUMS.txt)
+# The real installer: a double-clickable .pkg (built with pkgbuild,
+# part of Xcode command line tools -- no extra tool needed) that runs
+# macOS's own Installer.app, installs Runyx.app into /Applications,
+# and needs nothing from the user beyond clicking through it. This is
+# macOS's equivalent of the Windows Inno Setup installer
+# (scripts/package/runyx.iss) -- same idea, platform-native mechanism.
+PKG_NAME="Runyx-$PKG_VERSION-Installer-$GOARCH_BUILD.pkg"
+pkgbuild \
+  --component "$APP" \
+  --install-location /Applications \
+  --identifier com.runyx.app \
+  --version "$PKG_VERSION" \
+  "$OUT_DIR/$PKG_NAME"
 
-echo "Done: $OUT_DIR/$ARCHIVE_NAME"
+(cd "$OUT_DIR" && { sha256sum "$ARCHIVE_NAME" "$PKG_NAME" 2>/dev/null || shasum -a 256 "$ARCHIVE_NAME" "$PKG_NAME"; } >> SHA256SUMS.txt)
+
+echo "Done: $OUT_DIR/$ARCHIVE_NAME, $OUT_DIR/$PKG_NAME"
 cat "$OUT_DIR/SHA256SUMS.txt"

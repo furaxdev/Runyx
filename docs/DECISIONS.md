@@ -858,3 +858,66 @@ exactly like `windows-release` proves the Windows side.
   everything this sandbox genuinely could not verify (real window
   rendering outside Xvfb, Arch `pacman -U`, every macOS item, the
   per-OS offline flight-tests).
+
+## 2026-10-25 — Real installers for Windows and macOS (not just zips)
+
+Follow-up: "make a Runyx(version)Installer.exe that installs and sets
+up Runyx, same for macOS." Both platforms already had a real app
+(`Runyx.exe`, `Runyx.app`); what was missing was the actual
+double-click-and-it's-installed experience, built and genuinely
+verified rather than just a script nobody had run.
+
+- **Windows (`scripts/package/runyx.iss`, Inno Setup)**: rather than
+  trying to get Inno Setup's compiler running under Wine on this
+  Linux sandbox (fragile, and the mingw-w64 cross-compile path already
+  proved `Runyx.exe` itself builds correctly), `.github/workflows/
+  ci.yml` gained a `windows-installer` job on `runs-on: windows-latest`
+  -- a genuine, native Windows machine via GitHub's own runners, the
+  same reasoning as `darwin-release`'s macOS runners. It installs
+  mingw-w64 and Inno Setup via Chocolatey, builds `Runyx.exe` natively
+  (hitting the exact same `EventToken.h` lowercase-vs-uppercase
+  mismatch the Linux cross-compile does, since Chocolatey's `mingw`
+  package bundles the same upstream mingw-w64 SDK headers -- same
+  shim), compiles `runyx.iss` with `ISCC.exe` into
+  `Runyx-<version>-Installer.exe`, and then **actually installs it**:
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, confirms `Runyx.exe`
+  landed at `%LOCALAPPDATA%\Programs\Runyx\Runyx.exe` and that
+  `Runyx.exe version` runs, then silently uninstalls it and confirms
+  it's gone. A real install/uninstall round trip on genuine Windows,
+  automated, every push -- not just "it compiled." `runyx.iss` itself
+  gained `/DMyAppVersion=`/`/DSourceExe=` overrides (so CI can pass the
+  commit-based CI version and point at wherever it built the exe) and
+  an `OutputBaseFilename` that actually includes the version
+  (`Runyx-{#MyAppVersion}-Installer`), matching what was asked for
+  literally.
+- **macOS (`scripts/package/macos-release.sh`, now also builds a
+  `.pkg`)**: added a `pkgbuild --component Runyx.app --install-location
+  /Applications ...` step after the existing `.app` build -- `pkgbuild`
+  ships with Xcode command line tools, already present on the
+  `darwin-release` job's runners, no new dependency. Produces
+  `Runyx-<version>-Installer-<arch>.pkg`, the macOS equivalent of a
+  Windows installer: double-click, click through Installer.app's
+  wizard, Runyx is in `/Applications`. `darwin-release`'s CI job now
+  **actually installs it** too: `sudo installer -pkg ... -target /`,
+  confirms `/Applications/Runyx.app` exists and `Runyx version` runs
+  from inside it, then removes it -- the same real-install-round-trip
+  rigor as Windows, on genuine macOS hardware/VMs (`macos-13` Intel,
+  `macos-14` Apple Silicon).
+- **Version string sanitization, both platforms**: CI builds pass a
+  free-form `ci-<sha>` version (so `runyx version` shows the exact
+  commit), but a Windows/macOS installer's own version metadata
+  doesn't accept that format as cleanly as a `.deb`'s does (Debian's
+  hard rejection of a non-digit-led version is what originally
+  surfaced this exact class of bug for Linux, fixed in the entry right
+  above this one) -- `macos-release.sh` picked up the same
+  digit-prefixed `PKG_VERSION` fallback pattern (`0.0.0` for a non-
+  numeric input) `linux-release.sh` already uses, and the
+  `windows-installer` CI job passes a clean `0.0.0-ci` as
+  `MyAppVersion` for the same reason, independent of the full
+  `ci-<sha>` string baked into the binary via `-ldflags`.
+- **Not done here**: nothing about this was run by a human on a real
+  screen -- the CI jobs prove the install mechanics work (files land
+  where they should, the binary runs, uninstall is clean), not that
+  the installer wizard *looks* right or that Start Menu/Dock entries
+  actually open the app when clicked. `docs/MANUAL_TESTS.md` items 25
+  and 31-32 are exactly that remaining by-eye checklist.

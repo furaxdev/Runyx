@@ -135,12 +135,17 @@ items are about the real, integrated, interactive experience.
        CDN — verified in this sandbox by grepping the built UI for
        external `http(s)://` references, but seeing it actually render
        correctly offline on a real machine is the real test).
-25. **Installer** (optional item): with Inno Setup installed, run
-    `iscc scripts\package\runyx.iss` (after placing a built `Runyx.exe`
-    next to it) and confirm the resulting `runyx-setup.exe` installs
-    without admin rights, creates a Start Menu entry, and — if the
-    desktop-icon task is checked — a desktop shortcut, both launching
-    Runyx correctly.
+25. **Installer wizard, by eye**: download `Runyx-<version>-
+    Installer.exe` from the `windows-installer` CI artifact (or build
+    it yourself: `iscc /DMyAppVersion=<version> scripts\package\
+    runyx.iss` with a built `Runyx.exe` next to it) and actually
+    double-click it -- CI already confirmed the silent
+    (`/VERYSILENT`) install/uninstall round trip works end to end on
+    a real Windows runner (see `scripts/package/README.md`), so what's
+    left is purely the interactive wizard: it should run without admin
+    rights, create a Start Menu entry, create a desktop shortcut if
+    that task is checked, and the "Launch Runyx" checkbox at the end
+    should actually open the app window.
 
 ## Linux desktop app (Debian/Ubuntu/Arch)
 
@@ -175,27 +180,35 @@ to see the actual window render and interact with it normally.
 
 ## macOS desktop app
 
-Nothing in this section was run in this sandbox at all — there's no
-macOS here. `.github/workflows/ci.yml`'s `darwin-release` job builds
-a real `Runyx.app` on GitHub's own `macos-13`/`macos-14` runners on
-every push, which is the strongest automated verification available,
-but a human still needs to actually open it.
+`.github/workflows/ci.yml`'s `darwin-release` job builds a real
+`Runyx.app` *and* a real `Runyx-<version>-Installer-<arch>.pkg` on
+GitHub's own `macos-13`/`macos-14` runners on every push, and actually
+installs the `.pkg` with macOS's own `installer -pkg ... -target /`
+command-line tool, confirming `Runyx.app` lands in `/Applications` and
+runs -- a genuine, automated install round trip. What's below is the
+interactive, by-eye part no CI job can check.
 
-31. **Gatekeeper on first launch**: download/unzip
-    `runyx-darwin-arm64.zip` (Apple Silicon) or `-amd64.zip` (Intel)
-    from the `darwin-release` CI artifact, double-click `Runyx.app`.
-    Since it's unsigned and unnotarized, macOS will refuse to open it
-    the first time ("cannot be opened because the developer cannot be
-    verified") — confirm that System Settings → Privacy & Security →
-    "Open Anyway" (or right-click → Open) lets it through, and that it
-    then opens normally on every later launch.
-32. **Window, icon, single instance, daemon reuse**: same checks as
+31. **Gatekeeper on first launch**: download the `.pkg` (or
+    `runyx-darwin-arm64.zip`/`-amd64.zip` for the bare `.app`) from the
+    `darwin-release` CI artifact and actually run the installer /
+    double-click `Runyx.app`. Since it's unsigned and unnotarized,
+    macOS will refuse to open it the first time ("cannot be opened
+    because the developer cannot be verified") — confirm that System
+    Settings → Privacy & Security → "Open Anyway" (or right-click →
+    Open) lets it through, and that it then opens normally on every
+    later launch.
+32. **Installer UI, by eye**: run the `.pkg` interactively (not
+    `installer -pkg ... -target /`, which CI already proved works) and
+    confirm the standard macOS Installer.app wizard looks right —
+    the app name/icon, the install-location step, and that
+    `/Applications/Runyx.app` is there and runs afterward.
+33. **Window, icon, single instance, daemon reuse**: same checks as
     the Windows/Linux sections, on a real Mac — the window renders
     with no browser chrome, the mascot icon shows in the Dock, a
     second launch doesn't open a duplicate, and closing the window
     stops the daemon it started (or doesn't, if it merely connected to
     one already running).
-33. **The offline flight-test**, same as Windows item 24 but on macOS.
+34. **The offline flight-test**, same as Windows item 24 but on macOS.
 
 This list grows as later milestones add more hardware-dependent
 features (plugins, automation, distribution).

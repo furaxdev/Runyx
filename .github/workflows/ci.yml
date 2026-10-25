@@ -103,6 +103,70 @@ jobs:
             /tmp/windows-release/SHA256SUMS.txt
           if-no-files-found: error
 
+  windows-installer:
+    # The real, double-click, click-through-a-wizard Windows installer
+    # (scripts/package/runyx.iss, Inno Setup), built and compiled for
+    # real on a native Windows runner -- unlike windows-release above
+    # (which cross-compiles Runyx.exe itself from Linux via mingw-w64,
+    # already proven in CI), there's no practical way to run Inno
+    # Setup's compiler anywhere but Windows (or Wine, not attempted).
+    # This job builds Runyx.exe natively here too, rather than
+    # downloading windows-release's artifact, so it's a self-contained
+    # proof that the whole chain -- native cgo build, WebView2 window,
+    # icon, installer -- works start to finish on real Windows.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install mingw-w64 (cgo needs a real C/C++ compiler) and Inno Setup
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          choco install innosetup --no-progress -y
+      - name: Build Runyx.exe natively
+        run: |
+          set -eu
+          # Same EventToken.h case-mismatch mingw-w64 hits when
+          # cross-compiling from Linux (see windows-release.sh) --
+          # Chocolatey's mingw package bundles the same upstream
+          # mingw-w64 SDK headers, lowercase eventtoken.h included.
+          mkdir -p /tmp/mingw-shim
+          printf '#include "eventtoken.h"\n' > /tmp/mingw-shim/EventToken.h
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERSION="ci-${{ github.sha }}"
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="-I/tmp/mingw-shim"
+          export CGO_CXXFLAGS="-I/tmp/mingw-shim"
+          go build -ldflags "-H=windowsgui -X github.com/furaxdev/runyx/internal/version.Version=$VERSION -X github.com/furaxdev/runyx/internal/version.Commit=$COMMIT -X github.com/furaxdev/runyx/internal/version.BuildDate=$BUILD_DATE" \
+            -o scripts/package/Runyx.exe ./cmd/runyx
+      - name: Compile the installer with Inno Setup
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.0.0-ci /DSourceExe=Runyx.exe scripts\package\runyx.iss
+      - name: Smoke-test the installer silently, confirm it actually installs
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem scripts\package\Output\*.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          $installed = "$env:LOCALAPPDATA\Programs\Runyx\Runyx.exe"
+          if (-not (Test-Path $installed)) { throw "Runyx.exe not found after silent install at $installed" }
+          & $installed version
+          $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\Runyx\unins*.exe" | Select-Object -First 1
+          Start-Process -FilePath $uninstaller.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          if (Test-Path $installed) { throw "Runyx.exe still present after silent uninstall" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-windows-installer
+          path: scripts/package/Output/*.exe
+          if-no-files-found: error
+
   linux-release:
     # Builds the real Linux desktop deliverable: a `runyx` binary with
     # the native WebKitGTK app window compiled in (cgo; no cross
@@ -168,13 +232,22 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build and package Runyx.app
+      - name: Build and package Runyx.app + installer .pkg
         run: sh scripts/package/macos-release.sh "ci-${{ github.sha }}" /tmp/darwin-release
+      - name: Smoke-test the .pkg installer, confirm it actually installs
+        run: |
+          set -eu
+          pkg="$(ls /tmp/darwin-release/*.pkg)"
+          sudo installer -pkg "$pkg" -target /
+          test -d /Applications/Runyx.app
+          /Applications/Runyx.app/Contents/MacOS/Runyx version
+          sudo rm -rf /Applications/Runyx.app
       - uses: actions/upload-artifact@v4
         with:
           name: runyx-darwin-${{ matrix.goarch }}
           path: |
             /tmp/darwin-release/runyx-darwin-${{ matrix.goarch }}.zip
+            /tmp/darwin-release/*.pkg
             /tmp/darwin-release/SHA256SUMS.txt
           if-no-files-found: error
 
