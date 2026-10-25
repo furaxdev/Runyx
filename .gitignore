@@ -1,4 +1,36 @@
+/runyx
+/runyx.exe
+/dist/
+*.gguf
+*.part
+*.runyx-download.json
+
+# Go
+/vendor/
+
+# web/
+web/node_modules/
+web/dist/
+web/.svelte-kit/
+
+# scripts/demo/
+scripts/demo/node_modules/
+scripts/demo/package-lock.json
+demo-output/
+
+# android/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+
+# editors / OS
 .DS_Store
+.vscode/
+.idea/
+
+# marketing site
 node_modules/
 .vercel
 .env*

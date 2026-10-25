@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <application
+        android:label="Runyx"
+        android:theme="@style/Theme.Runyx"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <!-- The paired PC is always reached over plain http://<lan-ip>:<port>
+             (Runyx has no HTTPS story for a device the user pairs on their
+             own LAN), and Android 9+ blocks cleartext traffic by default.
+             @xml/network_security_config allows cleartext; the "LAN/.local
+             only" restriction is enforced in code — see
+             Pairing.kt's isPrivateOrLocalHost() and that file's comment. -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Share Sheet target (item 27): "Share to Runyx" from any
+                 app sharing plain text pre-fills the chat input. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

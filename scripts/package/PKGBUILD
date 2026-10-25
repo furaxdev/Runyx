@@ -1,0 +1,25 @@
+# Maintainer: FuraxDev
+# AUR PKGBUILD for Runyx. Not published to the AUR yet. Untested in
+# this session (no Arch/makepkg available in this Debian-based
+# sandbox) — see docs/MANUAL_TESTS.md.
+pkgname=runyx
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="100% local LLM runner — fast, Ollama/OpenAI-compatible, with a built-in UI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/furaxdev/runyx"
+license=('MIT')
+depends=()
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/furaxdev/runyx/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # filled in by release automation
+
+build() {
+  cd "$pkgname-$pkgver"
+  CGO_ENABLED=0 go build -ldflags "-s -w" -o runyx ./cmd/runyx
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 runyx "$pkgdir/usr/bin/runyx"
+}

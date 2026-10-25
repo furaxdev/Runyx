@@ -1,0 +1,391 @@
+name: Demo
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ccr-8047f90c-ur2jz8
+    # Skip pushes that only touch the TUI or docs: they can't change the
+    # daemon/web UI the demo exercises, and re-running Playwright on every
+    # TUI commit just burns CI time and noise (concurrency.cancel-in-progress
+    # below already cancels a superseded run, but it's better to never
+    # start it).
+    paths-ignore:
+      - "tui/**"
+      - "docs/**"
+      - "**.md"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runyx-demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Was Qwen/Qwen2.5-0.5B-Instruct-GGUF. A dedicated isolation
+      # workflow (.github/workflows/demo-diagnose.yml, see its run
+      # output linked from docs/DECISIONS.md) proved this quant
+      # produces garbled multilingual output on real GitHub runners in
+      # every variant tested: pruned and unpruned CPU kernel, default
+      # and --jinja chat template. The earlier "AMD-EPYC CPU-kernel
+      # correctness bug" theory below was the wrong diagnosis — the
+      # same matrix run showed Llama-3.2-1B-Instruct answering "4" to
+      # "What is 2+2?" correctly in both pruned and unpruned variants,
+      # on the same runner, in the same job. Switched the demo to the
+      # model that's actually proven to work here.
+      MODEL_SPEC: "bartowski/Llama-3.2-1B-Instruct-GGUF"
+      RUNYX_HOME: ${{ github.workspace }}/.runyx-demo
+      LISTEN_ADDR: "0.0.0.0:11535"
+      # Pin the llama.cpp build instead of always following "latest":
+      # upstream has no separate "stable" channel (every release is a
+      # continuous-build nightly). Bump this deliberately (not
+      # blindly) if it needs updating.
+      RUNYX_LLAMA_CPP_TAG: "b11836"
+      # No longer known to be necessary now that the demo model itself
+      # was the actual cause (see MODEL_SPEC's comment above) rather
+      # than CPU-kernel selection — kept on anyway since it's a no-cost
+      # safety margin for a small demo model, not because it's load-
+      # bearing for correctness anymore.
+      RUNYX_LLAMA_CPP_SAFE_CPU_KERNEL: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build web UI + embed it
+        run: sh scripts/build-ui.sh
+
+      - name: Build runyx
+        run: go build -o runyx ./cmd/runyx
+
+      - name: Write demo config
+        run: |
+          mkdir -p "$RUNYX_HOME/config/runyx" "$RUNYX_HOME/data/models" "$RUNYX_HOME/data/backends"
+          cat > "$RUNYX_HOME/config/runyx/config.toml" <<EOF
+          listen_addr = "$LISTEN_ADDR"
+          models_dir = "$RUNYX_HOME/data/models"
+          backends_dir = "$RUNYX_HOME/data/backends"
+          data_dir = "$RUNYX_HOME/data"
+          telemetry = false
+          idle_unload_seconds = 600
+          vram_budget_mb = 0
+          EOF
+          echo "XDG_CONFIG_HOME=$RUNYX_HOME/config" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$RUNYX_HOME/data" >> "$GITHUB_ENV"
+
+      # Caches the downloaded+extracted llama-server build across runs.
+      # Keyed without the release tag (static key): this is a demo, not
+      # a correctness-critical path, so a slightly older cached CPU
+      # build is an acceptable tradeoff for not re-downloading ~100MB+
+      # on every push.
+      - name: Cache llama-server backend
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.RUNYX_HOME }}/data/backends
+          # v4: v3's first-ever save (this key had never been hit before)
+          # happened on the very run that added
+          # RUNYX_LLAMA_CPP_SAFE_CPU_KERNEL — before that env var existed
+          # — so it cached an unpruned extraction with the higher-scoring
+          # (apparently broken on this CI's AMD EPYC runners) CPU kernel
+          # still present. Ensure() only checks that the server binary
+          # file exists before trusting a cached release dir ("already
+          # cached" in internal/backend/fetch.go) — it never re-applies
+          # pruneToBaselineCPUKernel to something already on disk — so
+          # bumping the key is the only way to force one fresh,
+          # actually-pruned extraction. Bump again if this prune logic
+          # itself changes.
+          key: runyx-demo-backend-linux-amd64-v4
+
+      # Caches the pulled GGUF model (and its models.json registry
+      # sidecar) across runs. `runyx run`/`pull` below check `runyx
+      # list` first and skip pulling again on a cache hit.
+      - name: Cache pulled model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.RUNYX_HOME }}/data/models
+          # v2: force a fresh pull once, to rule out a stale models.json
+          # (or a stale tuning cache) surviving from before a fix landed
+          # — the "skip if already in `runyx list`" step below means a
+          # cache hit otherwise persists whatever was first pulled here
+          # forever, unaffected by later code changes.
+          key: runyx-demo-model-llama32-1b-v1
+
+      # Every step below pipes to `tee`, and the default `bash -e` shell
+      # only checks the exit status of the last command in a pipeline —
+      # without `pipefail`, a real failure in `runyx` is silently
+      # swallowed by tee's own success, and the step goes green with a
+      # misleading empty or truncated terminal capture.
+      - name: Terminal demo — doctor
+        run: |
+          set -o pipefail
+          mkdir -p demo-output/terminal
+          ./runyx doctor | tee demo-output/terminal/01-doctor.txt
+
+      - name: Terminal demo — recommend
+        run: |
+          set -o pipefail
+          ./runyx recommend | tee demo-output/terminal/02-recommend.txt
+
+      - name: Terminal demo — pull (skips if already cached)
+        run: |
+          set -o pipefail
+          if ./runyx list | grep -qF "$MODEL_SPEC"; then
+            echo "$MODEL_SPEC already pulled (cache hit)" | tee demo-output/terminal/03-pull.txt
+          else
+            ./runyx pull "$MODEL_SPEC" | tee demo-output/terminal/03-pull.txt
+          fi
+
+      # Catches exactly the failure mode that made the demo's earlier
+      # Qwen2.5-0.5B pairing look "fixed" once the Playwright timeout
+      # was resolved: the CLI starts, a stream of tokens comes back,
+      # and it's still garbled nonsense. "What is 2+2?" at temperature
+      # 0 has one knowable correct answer, so this step fails loudly
+      # instead of a human having to notice broken prose in a
+      # screenshot.
+      - name: Terminal demo — self-test (answer-checkable prompt)
+        run: |
+          set -o pipefail
+          ./runyx run "$MODEL_SPEC" --selftest | tee demo-output/terminal/04-selftest.txt
+
+      - name: Terminal demo — run (real model, real reply)
+        run: |
+          set -o pipefail
+          { printf 'Explain in one sentence what you are.\n/exit\n' | ./runyx run "$MODEL_SPEC"; } \
+            | tee demo-output/terminal/04-run.txt
+
+      - name: Terminal demo — bench
+        run: |
+          set -o pipefail
+          ./runyx bench "$MODEL_SPEC" | tee demo-output/terminal/05-bench.txt
+
+      # The attachment screenshot uploads a real image; without tesseract
+      # installed, Runyx has no way to analyze it (no vision model is
+      # loaded either) and the upload errors out server-side.
+      - name: Install tesseract (for the image-attachment screenshot)
+        run: sudo apt-get update -y && sudo apt-get install -y tesseract-ocr
+
+      - name: Start runyx serve
+        run: |
+          ./runyx serve > demo-output/terminal/serve.log 2>&1 &
+          echo $! > serve.pid
+          for i in $(seq 1 60); do
+            if curl -sf "http://127.0.0.1:11535/healthz" >/dev/null; then
+              echo "daemon healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::daemon never became healthy"
+          cat demo-output/terminal/serve.log
+          exit 1
+
+      # Separates "the model/server is just slow" from "the frontend never
+      # notices the stream ended" without going through Playwright at all:
+      # hits the daemon's two streaming chat endpoints directly and times
+      # them. See docs/DECISIONS.md.
+      - name: Probe streaming endpoints (SSE diagnostics)
+        run: |
+          set -o pipefail
+          mkdir -p demo-output/terminal
+          OUT=demo-output/terminal/06-stream-probe.txt
+          : > "$OUT"
+
+          probe() {
+            local label="$1" url="$2" body="$3"
+            echo "=== $label ($url) ===" | tee -a "$OUT"
+            local start_s end_s
+            start_s=$(date +%s.%N)
+
+            local first_token_s="" event_count=0 done_seen=0 finish_reason="<none>"
+            # Read curl's output as it arrives (process substitution, not
+            # "curl > file; read file" -- that would only timestamp lines
+            # after the whole request already finished, making "time to
+            # first token" silently equal "total time" on every run).
+            while IFS= read -r line; do
+              case "$line" in
+                "data: [DONE]")
+                  done_seen=1
+                  ;;
+                data:\ *)
+                  data="${line#data: }"
+                  if [ -z "$first_token_s" ]; then first_token_s=$(date +%s.%N); fi
+                  event_count=$((event_count + 1))
+                  fr=$(printf '%s' "$data" | grep -o '"finish_reason":"[a-z_]*"' || true)
+                  [ -n "$fr" ] && finish_reason="$fr"
+                  ;;
+                *'"done":true'*)
+                  # Ollama-style NDJSON terminal line, for /api/chat.
+                  done_seen=1
+                  ;;
+                *'"message"'*)
+                  if [ -z "$first_token_s" ]; then first_token_s=$(date +%s.%N); fi
+                  event_count=$((event_count + 1))
+                  ;;
+              esac
+            done < <(curl -N -sS -m 90 -X POST "$url" -H "Content-Type: application/json" -d "$body" 2>>"$OUT")
+            end_s=$(date +%s.%N)
+            if [ -z "$first_token_s" ]; then first_token_s="$end_s"; fi
+
+            local ttft total tps
+            ttft=$(awk -v a="$start_s" -v b="$first_token_s" 'BEGIN{printf "%.2f", b-a}')
+            total=$(awk -v a="$start_s" -v b="$end_s" 'BEGIN{printf "%.2f", b-a}')
+            tps=$(awk -v n="$event_count" -v t="$total" 'BEGIN{ if (t>0) printf "%.2f", n/t; else print "0" }')
+            {
+              echo "time to first token: ${ttft}s"
+              echo "total time: ${total}s"
+              echo "event/token count: $event_count"
+              echo "events per second: $tps"
+              echo "finish_reason seen: $finish_reason"
+              echo "stream end signal seen ([DONE] or done:true): $done_seen"
+              echo
+            } | tee -a "$OUT"
+          }
+
+          probe "OpenAI-compatible /v1/chat/completions (max_tokens=32, temp=0)" \
+            "http://127.0.0.1:11535/v1/chat/completions" \
+            "{\"model\":\"$MODEL_SPEC\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi in exactly three words.\"}],\"max_tokens\":32,\"temperature\":0,\"stream\":true}"
+
+          probe "Ollama-compatible /api/chat (no token cap honored upstream today)" \
+            "http://127.0.0.1:11535/api/chat" \
+            "{\"model\":\"$MODEL_SPEC\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi in exactly three words.\"}],\"stream\":true,\"options\":{\"num_predict\":32,\"temperature\":0}}"
+
+          cat "$OUT"
+
+      - name: Install Playwright
+        working-directory: scripts/demo
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Capture screenshots + video
+        working-directory: scripts/demo
+        env:
+          RUNYX_BASE_URL: "http://127.0.0.1:11535"
+          RUNYX_OUT_DIR: ${{ github.workspace }}/demo-output
+          RUNYX_PROMPT: "Explain in one sentence what you are."
+        run: node screenshot.mjs
+
+      - name: Stop runyx serve
+        if: always()
+        run: |
+          if [ -f serve.pid ]; then
+            kill "$(cat serve.pid)" 2>/dev/null || true
+          fi
+
+      - name: Build screenshots README
+        if: always()
+        run: OUT_DIR=demo-output sh scripts/demo/make-readme.sh
+
+      - name: Upload demo artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runyx-demo-${{ github.run_id }}
+          path: demo-output/**
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Publish screenshots to demo-screenshots branch
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B demo-screenshots "$GITHUB_SHA"
+          rm -rf docs/screenshots
+          mkdir -p docs/screenshots
+          cp -r demo-output/screenshots/. docs/screenshots/
+          cp demo-output/README.md docs/screenshots/README.md
+          git add docs/screenshots
+          if git diff --cached --quiet; then
+            echo "no screenshot changes to publish"
+          else
+            git commit -m "demo: refresh screenshots (run ${{ github.run_id }})"
+            git push --force origin demo-screenshots
+          fi
+
+      - name: Job summary
+        if: always()
+        run: OUT_DIR=demo-output sh scripts/demo/make-summary.sh >> "$GITHUB_STEP_SUMMARY"
+
+  # Bonus (item 6): run a real Android emulator and screenshot the app.
+  # Best-effort — KVM/emulator boot in CI is known to be flaky. Never
+  # blocks the main `demo` job (no dependency between them) and never
+  # fails the workflow (continue-on-error). If this keeps failing after
+  # a couple of pushes, drop it and record why in docs/BLOCKED.md rather
+  # than fighting CI indefinitely.
+  android-demo:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK
+        env:
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+        run: |
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -sS -o cmdline-tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0" \
+            "system-images;android-30;google_apis;x86_64" "emulator"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run emulator and screenshot the app
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+            adb shell am start -n dev.furax.runyx/.MainActivity
+            sleep 8
+            mkdir -p demo-output/android
+            adb shell screencap -p /sdcard/runyx-pairing.png
+            adb pull /sdcard/runyx-pairing.png demo-output/android/pairing-screen.png
+
+      - name: Upload Android screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runyx-demo-android-${{ github.run_id }}
+          path: demo-output/android/**
+          if-no-files-found: ignore
+          retention-days: 30

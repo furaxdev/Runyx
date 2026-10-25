@@ -1,0 +1,25 @@
+{
+  "name": "@runyx/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Runyx web UI — Svelte + Vite, embedded into the runyx binary via go:embed at build time (see scripts/build.sh, added in M2).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.1.0",
+    "svelte": "^4.2.0",
+    "svelte-check": "^3.6.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vitest": "^2.1.4"
+  },
+  "dependencies": {
+    "lucide-svelte": "^0.468.0"
+  }
+}

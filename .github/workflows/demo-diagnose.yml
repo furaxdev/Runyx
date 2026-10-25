@@ -1,0 +1,191 @@
+name: Demo diagnose (AMD EPYC gibberish isolation)
+
+# Manually-triggered diagnostic job (item 2 of docs/RUNYX_CODE.md's
+# night-mode brief): isolates why the demo's captured model reply is
+# still unreadable (docs/screenshots/light/03-conversation-response.png
+# on the demo-screenshots branch, as of commit 9a308d9, is garbled
+# multilingual text) despite the CPU-kernel-pruning workaround
+# (RUNYX_LLAMA_CPP_SAFE_CPU_KERNEL, see internal/backend/fetch.go)
+# already being active in demo.yml. Tests the three axes named in the
+# brief: CPU-kernel pruning on/off, chat template (--jinja) on/off, and
+# a second, unrelated model family as a control -- across two
+# completely separate backend extractions (one pruned, one not) so the
+# "already cached, skip pruning" early-return in Fetcher.Ensure can't
+# mask the on/off comparison. Writes every raw completion to the job
+# summary for a human (or a later CI run) to read directly, rather
+# than inferring correctness from the daemon merely staying up.
+#
+# This cannot be run in this project's sandboxed dev session: that
+# sandbox is an Intel Xeon host with no outbound access to
+# github.com/ggml-org, so the AMD-EPYC-specific bug this isolates
+# can't be reproduced locally at all -- see docs/BLOCKED.md.
+
+on:
+  workflow_dispatch:
+  # workflow_dispatch alone only appears in the Actions API/UI once a
+  # workflow file exists on the default branch, which this project's
+  # rules don't allow (nothing merges into main from here) -- so this
+  # also triggers on push to this branch, same as demo.yml, instead.
+  # Harmless to leave this way: this workflow is a one-shot diagnostic,
+  # not something that needs re-running on every subsequent push --
+  # delete this trigger (or the whole file) once the isolation is done.
+  push:
+    branches:
+      - ccr-8047f90c-ur2jz8
+    paths:
+      - ".github/workflows/demo-diagnose.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build runyx
+        run: go build -o runyx ./cmd/runyx
+
+      - name: Report runner CPU
+        run: |
+          mkdir -p diagnose-output
+          { echo "=== /proc/cpuinfo model name + flags ==="; grep -m1 "model name" /proc/cpuinfo; grep -m1 flags /proc/cpuinfo | tr ' ' '\n' | grep -E "^avx|^sse|^f16c" | sort -u; } | tee diagnose-output/00-cpu.txt
+
+      # Two completely separate RUNYX_HOME trees so each gets its own
+      # fresh backend extraction -- Fetcher.Ensure's "already cached"
+      # check would otherwise skip pruning on the second one.
+      - name: Set up unpruned + pruned homes
+        run: |
+          for variant in unpruned pruned; do
+            home="$PWD/.runyx-diag-$variant"
+            mkdir -p "$home/config/runyx" "$home/data/models" "$home/data/backends"
+            cat > "$home/config/runyx/config.toml" <<EOF
+          listen_addr = "127.0.0.1:0"
+          models_dir = "$home/data/models"
+          backends_dir = "$home/data/backends"
+          data_dir = "$home/data"
+          telemetry = false
+          idle_unload_seconds = 600
+          vram_budget_mb = 0
+          EOF
+          done
+
+      - name: Pull both models into both homes
+        run: |
+          set -o pipefail
+          for variant in unpruned pruned; do
+            export XDG_CONFIG_HOME="$PWD/.runyx-diag-$variant/config"
+            export XDG_DATA_HOME="$PWD/.runyx-diag-$variant/data"
+            ./runyx pull "Qwen/Qwen2.5-0.5B-Instruct-GGUF" | tee -a diagnose-output/01-pull-$variant.txt
+            ./runyx pull "bartowski/Llama-3.2-1B-Instruct-GGUF" | tee -a diagnose-output/01-pull-$variant.txt
+          done
+
+      # One `runyx run` per variant triggers Fetcher.Ensure with the
+      # right RUNYX_LLAMA_CPP_SAFE_CPU_KERNEL state for that variant's
+      # own backends_dir, so the extraction (and prune, or lack of it)
+      # actually happens -- then we drive llama-server ourselves
+      # directly for the rest of the matrix, reusing that extraction.
+      - name: Trigger backend extraction per variant (pruned / unpruned)
+        env:
+          RUNYX_LLAMA_CPP_TAG: "b11836"
+        run: |
+          set -o pipefail
+          export XDG_CONFIG_HOME="$PWD/.runyx-diag-unpruned/config"
+          export XDG_DATA_HOME="$PWD/.runyx-diag-unpruned/data"
+          { printf 'hi\n/exit\n' | timeout 120 ./runyx run "Qwen/Qwen2.5-0.5B-Instruct-GGUF"; } | tee diagnose-output/02-trigger-unpruned.txt || true
+
+          export XDG_CONFIG_HOME="$PWD/.runyx-diag-pruned/config"
+          export XDG_DATA_HOME="$PWD/.runyx-diag-pruned/data"
+          export RUNYX_LLAMA_CPP_SAFE_CPU_KERNEL=1
+          { printf 'hi\n/exit\n' | timeout 120 ./runyx run "Qwen/Qwen2.5-0.5B-Instruct-GGUF"; } | tee diagnose-output/02-trigger-pruned.txt || true
+
+          echo "=== unpruned kernel .so files ===" | tee -a diagnose-output/03-kernels.txt
+          find "$PWD/.runyx-diag-unpruned/data/backends" -name "libggml-cpu-*.so" | tee -a diagnose-output/03-kernels.txt
+          echo "=== pruned kernel .so files (should be exactly one) ===" | tee -a diagnose-output/03-kernels.txt
+          find "$PWD/.runyx-diag-pruned/data/backends" -name "libggml-cpu-*.so" | tee -a diagnose-output/03-kernels.txt
+
+      - name: Run the diagnostic matrix directly against llama-server
+        run: |
+          set -o pipefail
+          OUT=diagnose-output/04-matrix.txt
+          : > "$OUT"
+
+          run_variant() {
+            local label="$1" home_variant="$2" model_file="$3" extra_flags="$4"
+            echo "=== $label ===" | tee -a "$OUT"
+            local backend
+            backend=$(find "$PWD/.runyx-diag-$home_variant/data/backends" -type f -name "llama-server" | head -1)
+            if [ -z "$backend" ]; then
+              echo "no llama-server binary found for $home_variant" | tee -a "$OUT"
+              return
+            fi
+            local model
+            model=$(find "$PWD/.runyx-diag-$home_variant/data/models" -type f -name "*${model_file}")
+            if [ -z "$model" ]; then
+              echo "model file $model_file not found under $home_variant" | tee -a "$OUT"
+              return
+            fi
+
+            "$backend" --model "$model" --port 18123 --host 127.0.0.1 --ctx-size 2048 --batch-size 512 --threads 4 $extra_flags \
+              > "diagnose-output/server-$label.log" 2>&1 &
+            local pid=$!
+            for i in $(seq 1 60); do
+              curl -sf http://127.0.0.1:18123/health >/dev/null 2>&1 && break
+              sleep 1
+            done
+
+            local resp
+            resp=$(curl -sS -m 60 -X POST http://127.0.0.1:18123/v1/chat/completions \
+              -H "Content-Type: application/json" \
+              -d '{"model":"x","messages":[{"role":"user","content":"What is 2+2? Answer with one word."}],"max_tokens":16,"temperature":0,"stream":false}')
+            echo "raw response: $resp" | tee -a "$OUT"
+
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            echo | tee -a "$OUT"
+          }
+
+          QWEN_FILE="qwen2.5-0.5b-instruct-q4_k_m.gguf"
+          LLAMA_FILE="Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+
+          run_variant "qwen-unpruned-default"       unpruned "$QWEN_FILE"  ""
+          run_variant "qwen-pruned-default"         pruned   "$QWEN_FILE"  ""
+          run_variant "qwen-pruned-jinja"           pruned   "$QWEN_FILE"  "--jinja"
+          run_variant "llama32-unpruned-default"    unpruned "$LLAMA_FILE" ""
+          run_variant "llama32-pruned-default"      pruned   "$LLAMA_FILE" ""
+
+          cat "$OUT"
+
+      - name: Upload diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-diagnose-${{ github.run_id }}
+          path: diagnose-output/**
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "# Demo diagnose: AMD-EPYC gibberish isolation"
+            echo
+            for f in diagnose-output/*.txt; do
+              [ -f "$f" ] || continue
+              echo "<details><summary><code>$(basename "$f")</code></summary>"
+              echo
+              echo '```'
+              cat "$f"
+              echo '```'
+              echo "</details>"
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -2,35 +2,64 @@
 
 **https://tryrunyx.vercel.app**
 
-Des modèles de langage qui tournent sur **votre** machine.
+**Runyx** is a 100% local LLM runner, built to be effortless to install,
+pleasant to use, and as fast as raw `llama.cpp`. One binary: CLI, daemon,
+and an HTTP server compatible with both the **Ollama** (`/api/*`) and
+**OpenAI** (`/v1/*`) APIs, plus an embedded web UI and a companion
+Android app. Nothing leaves your machine without your consent.
 
-Runyx télécharge, exécute et sert des modèles ouverts en local. Un seul
-programme : une application de conversation sobre, des API qui parlent Ollama
-et OpenAI, et rien qui parte ailleurs sans votre accord.
+The product is English-only (UI, CLI, docs) by design — see
+`docs/DECISIONS.md`. Voice input still understands whatever language the
+user speaks; only the interface itself is English.
 
-## Ce qu'il fait
+## What it does
 
-- **Catalogue de modèles** — chaque entrée dit à quoi le modèle est bon, sa
-  taille, et s'il tourne bien, tourne, ou est trop lourd pour votre machine.
-- **Téléchargements reprenables** — une récupération interrompue repart où elle
-  s'est arrêtée, et le fichier est vérifié par empreinte.
-- **Compatible Ollama** — importez vos modèles existants, gardez vos outils :
-  Runyx répond sur l'API Ollama *et* sur l'API OpenAI.
-- **Toutes les pièces jointes** — PDF, Word, Excel, PowerPoint, texte, code,
-  archives. Les images passent par l'OCR pour les modèles sans vision.
-- **Base de connaissances** — projets avec leurs instructions, recherche locale
-  dans vos documents avec citations, mémoire que vous pouvez effacer.
-- **Privé par défaut** — rien ne sort de la machine. Pas de télémétrie, pas de
-  compte, pas de suivi.
-- **Agent shell** — il demande l'autorisation avant d'exécuter, reste dans le
-  dossier choisi, et tient un journal.
-- **Téléphone** — appairage Android par QR code, en texte ou en voix, vers les
-  modèles qui tournent sur votre PC.
+- **Model catalog** — every entry says what the model is good at, its
+  size, and whether it runs well, runs, or is too heavy for your
+  machine.
+- **Resumable downloads** — an interrupted fetch picks up where it left
+  off, and the file is verified by checksum.
+- **Ollama-compatible** — import your existing models, keep your tools:
+  Runyx answers on the Ollama API *and* the OpenAI API.
+- **Every attachment type** — PDF, Word, Excel, PowerPoint, text, code,
+  archives. Images go through OCR for models without vision.
+- **Knowledge base** — projects with their own instructions, local
+  search across your documents with citations, memory you can clear.
+- **Private by default** — nothing leaves the machine. No telemetry, no
+  account, no tracking.
+- **Shell agent** — asks for permission before running anything, stays
+  inside the chosen folder, and keeps a log.
+- **Phone** — Android pairing by QR code, in text or voice, to the
+  models running on your PC.
 
-## Statut
+### Quick start
 
-En développement actif. Les captures de ce dépôt sont de vraies captures.
+```bash
+go build -o runyx ./cmd/runyx
 
-## Licence
+./runyx doctor                 # hardware detection
+./runyx recommend               # models that actually fit this machine
+./runyx pull bartowski/Llama-3.2-1B-Instruct-GGUF   # download a model
+./runyx run bartowski/Llama-3.2-1B-Instruct-GGUF    # chat from the terminal
+./runyx run bartowski/Llama-3.2-1B-Instruct-GGUF --selftest  # one answer-checkable sanity check
+./runyx serve                  # start the daemon + HTTP API + web UI
+```
 
-À définir.
+Once `runyx serve` is running, these are available on
+`http://127.0.0.1:11535`:
+
+- Ollama-compatible: `GET /api/tags`, `POST /api/chat`, `POST /api/generate`, …
+- OpenAI-compatible: `GET /v1/models`, `POST /v1/chat/completions`, …
+
+See `docs/ARCHITECTURE.md`, `docs/ROADMAP.md` and `FEATURES.md` for the
+rest of the roadmap and current status.
+
+## Status
+
+Actively in development. The screenshots in this repo are real
+screenshots.
+
+### License
+
+MIT — see [LICENSE](LICENSE). Third-party dependency licenses are listed
+in [THIRD_PARTY.md](THIRD_PARTY.md).

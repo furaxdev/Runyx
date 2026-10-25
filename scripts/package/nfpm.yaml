@@ -1,0 +1,23 @@
+# nfpm config for .deb/.rpm packages: https://nfpm.goreleaser.com
+# Usage (once a release binary exists at dist/runyx):
+#   nfpm package --config scripts/package/nfpm.yaml --packager deb
+#   nfpm package --config scripts/package/nfpm.yaml --packager rpm
+#
+# Not run in this session (nfpm isn't installed in this sandbox) — see
+# docs/MANUAL_TESTS.md.
+name: runyx
+arch: amd64
+platform: linux
+version: 0.1.0
+section: utils
+priority: optional
+maintainer: FuraxDev
+description: 100% local LLM runner — fast, Ollama/OpenAI-compatible, with a built-in UI
+vendor: Runyx
+homepage: https://github.com/furaxdev/runyx
+license: MIT
+contents:
+  - src: ../../dist/runyx
+    dst: /usr/bin/runyx
+    file_info:
+      mode: 0755

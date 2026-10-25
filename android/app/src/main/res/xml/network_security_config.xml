@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Runyx is always paired to a PC on the user's own LAN and talks to it
+  over plain http:// (see docs/DECISIONS.md: TLS with certificate
+  pinning, item 23, is tracked future work, not done yet).
+
+  Android's network security config has no CIDR/subnet syntax for
+  `<domain>` entries — only exact hostnames/IPs and DNS-suffix matching
+  (`includeSubdomains`) — so "allow cleartext to 10.0.0.0/8" etc. can't
+  be expressed declaratively here the way it can for a literal domain
+  name. The actual "LAN/.local only" restriction the user-facing
+  product promises is therefore enforced in code instead, in
+  Pairing.kt's isPrivateOrLocalHost(): the app refuses to even attempt
+  pairing with (and therefore never connects cleartext to) a host
+  outside the private IPv4 ranges or a ".local" name. This config just
+  keeps the OS-level cleartext *capability* available for the IP
+  literals/mDNS names that check allows, instead of leaving the
+  platform-default (HTTPS-only) cleartext block in place, which would
+  reject every paired connection outright.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">local</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

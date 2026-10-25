@@ -1,0 +1,24 @@
+{
+  "name": "@runyx/tui",
+  "version": "0.1.0",
+  "description": "Runyx's terminal UI: a from-scratch terminal rendering engine (no Ink, no React, no blessed) talking to the Go daemon over HTTP+SSE.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "runyx-tui": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/main.ts --compile --outfile ../dist-tui/runyx-tui",
+    "build:linux-x64": "bun build ./src/main.ts --compile --target=bun-linux-x64 --outfile ../dist-tui/runyx-tui-linux-x64",
+    "build:macos-arm64": "bun build ./src/main.ts --compile --target=bun-darwin-arm64 --outfile ../dist-tui/runyx-tui-macos-arm64",
+    "build:macos-x64": "bun build ./src/main.ts --compile --target=bun-darwin-x64 --outfile ../dist-tui/runyx-tui-macos-x64",
+    "build:windows-x64": "bun build ./src/main.ts --compile --target=bun-windows-x64 --outfile ../dist-tui/runyx-tui-windows-x64.exe",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "bun-types": "^1.4.4",
+    "typescript": "^5.7.2"
+  }
+}

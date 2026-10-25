@@ -1,0 +1,13 @@
+# winget package manifest skeleton for Runyx.
+# Real submission to microsoft/winget-pkgs needs 3 files
+# (version/installer/locale); this is the installer manifest's shape
+# to start from. Not submitted or tested — see docs/MANUAL_TESTS.md.
+PackageIdentifier: FuraxDev.Runyx
+PackageVersion: 0.1.0
+InstallerType: zip
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/furaxdev/runyx/releases/download/v0.1.0/runyx-windows-amd64.zip
+    InstallerSha256: "" # filled in by release automation
+ManifestType: installer
+ManifestVersion: 1.6.0

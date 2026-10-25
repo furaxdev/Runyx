@@ -1,0 +1,17 @@
+# gitleaks config for Runyx. Extends the default ruleset; only adds an
+# allowlist for known-fake secrets used as test fixtures (e.g.
+# internal/secretscan's own tests, which must contain a real-shaped
+# fake token to prove the redactor catches it). Run before every
+# commit/push per docs/RUNYX_CODE.md's security rules:
+#   gitleaks detect --source . --no-git -c .gitleaks.toml
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-fake tokens used as test fixtures, never real credentials"
+paths = [
+  '''internal/secretscan/secretscan_test.go''',
+  '''internal/memory/memory_test.go''',
+  '''internal/pairing/pairing_test.go''',
+  '''internal/agent/agent_test.go''',
+]
