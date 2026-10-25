@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +38,80 @@ func TestServerArgsOmitsFlashAttnWhenNotTuned(t *testing.T) {
 		if a == "--flash-attn" {
 			t.Errorf("args = %v, did not expect --flash-attn when tuning.FlashAttn is false", args)
 		}
+	}
+}
+
+// TestServerArgsAlwaysPassesJinja guards the actual root cause of the
+// "coherent as raw /completion and as /v1/chat/completions run by
+// hand, garbled as Runyx" bug report: without --jinja, llama-server
+// renders chat messages with its own built-in guess at a template
+// instead of the model's real one from the GGUF, which is wrong for
+// some models (Qwen2.5 was the one that surfaced it) and produces
+// unreadable output even though the binary, the GGUF and the machine
+// are all fine.
+func TestServerArgsAlwaysPassesJinja(t *testing.T) {
+	args := serverArgs("/models/foo.gguf", 12345, modelstore.TuningParams{
+		CtxSize: 4096, BatchSize: 512, Threads: 4,
+	})
+	found := false
+	for _, a := range args {
+		if a == "--jinja" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("args = %v, want --jinja so llama-server renders the model's own chat template instead of guessing one", args)
+	}
+}
+
+// TestWaitHealthyFailsFastOnEarlyExit guards the other half of the
+// libgomp bug report: before this, a subprocess that died instantly
+// (missing shared library, bad flag) still made waitHealthy poll an
+// unreachable /health endpoint for the full 30-second deadline. Using
+// an unroutable address means the HTTP GET itself won't resolve
+// instantly either, so a loose bound (well under 30s) is enough to
+// prove this returns on the exited signal rather than the timeout.
+func TestWaitHealthyFailsFastOnEarlyExit(t *testing.T) {
+	exited := make(chan error, 1)
+	wantErr := errors.New("exit status 127")
+	exited <- wantErr
+
+	start := time.Now()
+	err := waitHealthy(context.Background(), "http://127.0.0.1:1", exited)
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "exit status 127") {
+		t.Fatalf("err = %v, want it to wrap the process exit error", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("waitHealthy took %s to notice the process had already exited, want well under the 30s timeout", elapsed)
+	}
+}
+
+// TestDiagnoseStartupFailureLibgomp guards the actionable-message half
+// of the libgomp bug report: the raw dynamic-linker error buried in
+// captured stderr should turn into an instruction a non-C++ user can
+// actually follow ("install libgomp1"), not just get echoed back.
+func TestDiagnoseStartupFailureLibgomp(t *testing.T) {
+	raw := "llama-server: error while loading shared libraries: libgomp.so.1: cannot open shared object file: No such file or directory"
+	got := diagnoseStartupFailure(raw)
+	if !strings.Contains(got, "libgomp1") && !strings.Contains(got, "libgomp") {
+		t.Errorf("diagnoseStartupFailure(%q) = %q, want it to name the libgomp package", raw, got)
+	}
+	if !strings.Contains(got, raw) {
+		t.Errorf("diagnoseStartupFailure(%q) = %q, want the raw output preserved too", raw, got)
+	}
+}
+
+// TestDiagnoseStartupFailureGenericPassesThroughUnrecognizedOutput
+// guards against diagnoseStartupFailure ever silently dropping output
+// it doesn't recognize a pattern in -- an unknown failure should still
+// show the raw llama-server output, just without a specific hint.
+func TestDiagnoseStartupFailureGenericPassesThroughUnrecognizedOutput(t *testing.T) {
+	raw := "llama-server: some unrelated crash nobody has seen before"
+	got := diagnoseStartupFailure(raw)
+	if !strings.Contains(got, raw) {
+		t.Errorf("diagnoseStartupFailure(%q) = %q, want the raw output preserved", raw, got)
 	}
 }
 

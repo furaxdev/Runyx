@@ -21,6 +21,7 @@ type Instance struct {
 	BaseURL   string
 
 	cmd      *exec.Cmd
+	exited   chan error // cmd.Wait()'s result; see the comment in Manager.Start
 	lastUsed time.Time
 	estMB    int
 	mu       sync.Mutex
@@ -144,23 +145,32 @@ func (m *Manager) Start(ctx context.Context, mdl modelstore.Model, tuning models
 		return nil, fmt.Errorf("start llama-server: %w", err)
 	}
 
+	// Exactly one goroutine ever calls cmd.Wait() (Go panics on a second
+	// call), so its result is published on a buffered channel that both
+	// a startup failure here and a later Stop()/StopAll() can read
+	// instead of calling Wait() again. Buffered by 1 so the goroutine
+	// never blocks even if nothing ever reads it.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
 	inst := &Instance{
 		ModelName: mdl.Name,
 		Port:      port,
 		BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
 		cmd:       cmd,
+		exited:    exited,
 		lastUsed:  time.Now(),
 		estMB:     estMB,
 	}
 
-	if err := waitHealthy(ctx, inst.BaseURL); err != nil {
+	if err := waitHealthy(ctx, inst.BaseURL, exited); err != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait() // reap; Kill alone leaves a zombie until the daemon exits
+		<-exited // reap; the Wait() goroutine above owns the only Wait() call
 		out := strings.TrimSpace(output.String())
 		if out == "" {
 			out = "(no output)"
 		}
-		return nil, fmt.Errorf("llama-server did not become healthy: %w\nllama-server output:\n%s", err, out)
+		return nil, fmt.Errorf("llama-server did not become healthy: %w\n%s", err, diagnoseStartupFailure(out))
 	}
 
 	m.mu.Lock()
@@ -199,7 +209,9 @@ func stopInstance(inst *Instance) error {
 		return nil
 	}
 	err := inst.cmd.Process.Kill()
-	_ = inst.cmd.Wait() // reap; Kill alone leaves a zombie until the daemon exits
+	if inst.exited != nil {
+		<-inst.exited // reap; the Wait() goroutine from Start owns the only Wait() call
+	}
 	return err
 }
 
@@ -270,6 +282,26 @@ func serverArgs(modelFile string, port int, tuning modelstore.TuningParams) []st
 		"--ctx-size", strconv.Itoa(tuning.CtxSize),
 		"--batch-size", strconv.Itoa(tuning.BatchSize),
 		"--threads", strconv.Itoa(tuning.Threads),
+		// Without --jinja, llama-server's /v1/chat/completions renders
+		// the prompt with its own built-in guess at a chat template
+		// (picked heuristically from the tokenizer, not the GGUF's
+		// actual chat_template metadata). For models whose template
+		// that guess doesn't match exactly -- Qwen2.5 was the one that
+		// surfaced this -- the resulting prompt is missing or
+		// misplaces the role markers (<|im_start|>, <|im_end|>, the
+		// assistant-turn prefix), and the model generates unreadable,
+		// often multilingual output despite the binary, the GGUF and
+		// the machine all being fine: confirmed by hand with curl
+		// against the same llama-server build (raw /completion with a
+		// hand-built prompt: coherent; /v1/chat/completions with
+		// --jinja, letting it read the real template from the GGUF:
+		// coherent and ~8.6 tok/s; without --jinja: the garbled,
+		// ~0.3 tok/s output Runyx was producing end to end). --jinja
+		// makes llama-server render the model's own embedded Jinja2
+		// chat_template instead, which is correct for any model that
+		// ships one (Qwen, Llama 3, Gemma, Mistral, ...) with no
+		// per-family template table to maintain here.
+		"--jinja",
 	}
 	if tuning.NGPULayers != 0 {
 		args = append(args, "--n-gpu-layers", strconv.Itoa(tuning.NGPULayers))
@@ -328,12 +360,22 @@ func (r *ringBuffer) String() string {
 	return string(r.buf)
 }
 
-func waitHealthy(ctx context.Context, baseURL string) error {
+// waitHealthy polls baseURL/health until it responds 200, ctx is done,
+// the 30-second deadline passes, or the subprocess exits early
+// (exited fires). That last case used to be invisible here: a process
+// that dies instantly -- a missing shared library, a bad flag -- still
+// made this function poll a connection that was never going to
+// succeed for the full 30 seconds before timing out, turning an
+// immediate, diagnosable failure into a generic "did not become
+// healthy" 30 seconds later.
+func waitHealthy(ctx context.Context, baseURL string, exited <-chan error) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-exited:
+			return fmt.Errorf("process exited before becoming healthy: %w", err)
 		default:
 		}
 		resp, err := http.Get(baseURL + "/health")
@@ -346,4 +388,22 @@ func waitHealthy(ctx context.Context, baseURL string) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("timed out waiting for %s/health", baseURL)
+}
+
+// diagnoseStartupFailure turns llama-server's raw captured stdout/
+// stderr into an actionable message, recognizing the specific failure
+// classes that are otherwise easy to miss in a wall of output: a
+// missing dynamic library prints one line, deep inside whatever else
+// the process logged before dying, and nothing about "cannot open
+// shared object file" tells a non-C++ user they need to install a
+// system package.
+func diagnoseStartupFailure(output string) string {
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "libgomp.so") || (strings.Contains(lower, "libgomp") && strings.Contains(lower, "cannot open shared object file")) {
+		return fmt.Sprintf("llama-server needs the GNU OpenMP runtime library (libgomp), which is not installed on this system. Install it (on Debian/Ubuntu: `sudo apt install libgomp1`; on Fedora/RHEL: `sudo dnf install libgomp`) and try again.\nllama-server output:\n%s", output)
+	}
+	if strings.Contains(lower, "error while loading shared libraries") || strings.Contains(lower, "cannot open shared object file") {
+		return fmt.Sprintf("llama-server failed to start because a required shared library is missing on this system. See the output below for which one.\nllama-server output:\n%s", output)
+	}
+	return fmt.Sprintf("llama-server output:\n%s", output)
 }
