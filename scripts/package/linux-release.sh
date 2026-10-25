@@ -37,6 +37,23 @@ elif ! pkg-config --exists webkit2gtk-4.0 2>/dev/null; then
   exit 1
 fi
 
+# Debian package versions must start with a digit (dpkg hard-rejects
+# anything else: "version number does not start with digit"), unlike
+# the free-form string that's fine to bake into the binary via
+# -ldflags. PKG_VERSION is what nfpm actually packages; VERSION (as
+# given) is still what `runyx version` reports, so a CI build's commit
+# SHA-based version string ("ci-<sha>") stays visible there even
+# though the .deb/Arch package itself needs a digit-led stand-in.
+case "$VERSION" in
+  [0-9]*) PKG_VERSION="$VERSION" ;;
+  *) PKG_VERSION="0.0.0+$VERSION" ;;
+esac
+# nfpm's deb/archlinux packagers also reject characters outside what
+# dpkg/pacman allow in a version string (letters, digits, and . + ~ : -);
+# replace anything else (a raw git SHA has none, but this keeps the
+# script safe for an arbitrary caller-supplied VERSION too).
+PKG_VERSION="$(printf '%s' "$PKG_VERSION" | tr -c 'A-Za-z0-9.+~:-' '_')"
+
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LDFLAGS="-X github.com/furaxdev/runyx/internal/version.Version=$VERSION -X github.com/furaxdev/runyx/internal/version.Commit=$COMMIT -X github.com/furaxdev/runyx/internal/version.BuildDate=$BUILD_DATE"
@@ -63,10 +80,10 @@ cp "$REPO_ROOT/assets/linux/icons/runyx-32.png" "$PKG_ROOT/usr/share/icons/hicol
 cp "$REPO_ROOT/assets/linux/icons/runyx-48.png" "$PKG_ROOT/usr/share/icons/hicolor/48x48/apps/runyx.png"
 cp "$REPO_ROOT/assets/linux/icons/runyx-256.png" "$PKG_ROOT/usr/share/icons/hicolor/256x256/apps/runyx.png"
 
-echo "Packaging .deb and Arch Linux packages with nfpm..."
-NFPM_VERSION="$VERSION" NFPM_PKGROOT="$PKG_ROOT" \
+echo "Packaging .deb and Arch Linux packages with nfpm (package version: $PKG_VERSION)..."
+NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
   nfpm package --config "$REPO_ROOT/scripts/package/nfpm.yaml" --packager deb --target "$OUT_DIR/"
-NFPM_VERSION="$VERSION" NFPM_PKGROOT="$PKG_ROOT" \
+NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
   nfpm package --config "$REPO_ROOT/scripts/package/nfpm.yaml" --packager archlinux --target "$OUT_DIR/"
 
 # Also ship a plain tarball (binary + desktop file + icons, same
