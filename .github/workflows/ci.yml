@@ -103,6 +103,81 @@ jobs:
             /tmp/windows-release/SHA256SUMS.txt
           if-no-files-found: error
 
+  linux-release:
+    # Builds the real Linux desktop deliverable: a `runyx` binary with
+    # the native WebKitGTK app window compiled in (cgo; no cross
+    # compiler needed, ubuntu-latest *is* linux/amd64), a .desktop
+    # entry + icon set so it shows up as a real application, and both
+    # a .deb and an Arch Linux package via nfpm. linux/arm64 isn't
+    # built here -- that would need an arm64 GTK/WebKit2GTK sysroot,
+    # a much bigger lift than mingw-w64 was for Windows; the plain
+    # CGO_ENABLED=0 CLI-only linux/arm64 build above is unaffected.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install GTK3/WebKit2GTK dev headers and nfpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build and package (.deb, Arch Linux, tarball)
+        run: sh scripts/package/linux-release.sh "ci-${{ github.sha }}" /tmp/linux-release
+      - name: Install and smoke-test the built .deb on this runner
+        run: |
+          sudo dpkg -i /tmp/linux-release/*.deb
+          runyx version
+          test -f /usr/share/applications/runyx.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/runyx.png
+          sudo dpkg -r runyx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-linux-amd64
+          path: |
+            /tmp/linux-release/*.deb
+            /tmp/linux-release/*.pkg.tar.zst
+            /tmp/linux-release/runyx-linux-amd64.tar.gz
+            /tmp/linux-release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  darwin-release:
+    # Builds the real macOS deliverable on actual macOS runners (no
+    # cross-compile trickery needed, or possible, for a cgo + Cocoa/
+    # WebKit build): a genuine Runyx.app bundle with the native window
+    # compiled in and a real .icns generated from the mascot icon via
+    # the standard sips/iconutil toolchain. One job per arch, each
+    # building natively on a runner of that architecture -- GOARCH set
+    # to amd64/arm64 would still need the other arch's clang target,
+    # which cgo cross-arch builds don't handle for free the way plain
+    # Go cross-compilation does.
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13 # Intel
+            goarch: amd64
+          - runner: macos-14 # Apple Silicon
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and package Runyx.app
+        run: sh scripts/package/macos-release.sh "ci-${{ github.sha }}" /tmp/darwin-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-darwin-${{ matrix.goarch }}
+          path: |
+            /tmp/darwin-release/runyx-darwin-${{ matrix.goarch }}.zip
+            /tmp/darwin-release/SHA256SUMS.txt
+          if-no-files-found: error
+
   web:
     runs-on: ubuntu-latest
     defaults:

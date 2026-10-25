@@ -142,5 +142,60 @@ items are about the real, integrated, interactive experience.
     desktop-icon task is checked — a desktop shortcut, both launching
     Runyx correctly.
 
+## Linux desktop app (Debian/Ubuntu/Arch)
+
+The install-and-smoke-test part of this (items 26-28) was actually
+done in this sandbox, for real, with a real `.deb` built by
+`scripts/package/linux-release.sh` — see `scripts/package/README.md`
+for exactly what that covered (`dpkg -i`, launched under `xvfb-run`,
+daemon answered real HTTP requests, single-instance confirmed with two
+concurrent launches). What's below is what still needs a human on a
+real desktop (a real X11/Wayland session, not a virtual framebuffer)
+to see the actual window render and interact with it normally.
+
+26. **App menu entry**: after installing the `.deb` (`sudo dpkg -i
+    runyx_*.deb`) or the Arch package (`sudo pacman -U
+    runyx-*.pkg.tar.zst`), confirm "Runyx" appears in the desktop
+    environment's application launcher/menu with the mascot icon (not
+    a generic one), and that launching it from there opens the window
+    — not just `runyx` typed into a terminal.
+27. **Window actually renders**: on a real desktop session, run
+    `runyx` and confirm an actual WebKitGTK window appears with the
+    chat UI inside (this sandbox could only confirm the process starts
+    and the daemon answers under Xvfb — there is no way to confirm
+    pixels actually render correctly without a real display).
+28. **Single instance / daemon reuse / closing stops it**: the same
+    three checks as the Windows section (items 19-21), redone on a
+    real Linux desktop to confirm they hold outside Xvfb too.
+29. **Arch package install**: on a real Arch machine, `sudo pacman -U`
+    the `.pkg.tar.zst` this sandbox only inspected the contents of
+    (never installed, no `pacman` here), and confirm it installs and
+    runs the same way the `.deb` was confirmed to.
+30. **The offline flight-test**, same as Windows item 24 but on Linux.
+
+## macOS desktop app
+
+Nothing in this section was run in this sandbox at all — there's no
+macOS here. `.github/workflows/ci.yml`'s `darwin-release` job builds
+a real `Runyx.app` on GitHub's own `macos-13`/`macos-14` runners on
+every push, which is the strongest automated verification available,
+but a human still needs to actually open it.
+
+31. **Gatekeeper on first launch**: download/unzip
+    `runyx-darwin-arm64.zip` (Apple Silicon) or `-amd64.zip` (Intel)
+    from the `darwin-release` CI artifact, double-click `Runyx.app`.
+    Since it's unsigned and unnotarized, macOS will refuse to open it
+    the first time ("cannot be opened because the developer cannot be
+    verified") — confirm that System Settings → Privacy & Security →
+    "Open Anyway" (or right-click → Open) lets it through, and that it
+    then opens normally on every later launch.
+32. **Window, icon, single instance, daemon reuse**: same checks as
+    the Windows/Linux sections, on a real Mac — the window renders
+    with no browser chrome, the mascot icon shows in the Dock, a
+    second launch doesn't open a duplicate, and closing the window
+    stops the daemon it started (or doesn't, if it merely connected to
+    one already running).
+33. **The offline flight-test**, same as Windows item 24 but on macOS.
+
 This list grows as later milestones add more hardware-dependent
 features (plugins, automation, distribution).

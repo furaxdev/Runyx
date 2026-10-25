@@ -765,3 +765,96 @@ and `runyx serve` unchanged for the headless/server case.
   real-offline experience needs a human on real Windows hardware --
   `docs/MANUAL_TESTS.md` items 18-25 are exactly that checklist, in
   the order a reviewer should work through them.
+
+## 2026-10-25 — Same treatment for Linux (Debian/Arch) and macOS
+
+Follow-up to the Windows desktop app work above: "do the same for
+every other system." `internal/guiwindow`'s three-tier window
+strategy and `cmd/runyx/cmd_gui.go`'s single-instance/daemon-reuse
+logic were already fully cross-platform (no OS-specific code there at
+all) -- what Linux and macOS were missing was the *native build being
+the one that actually ships*, a real package/bundle, an icon
+integrated into the desktop environment, and CI that proves it,
+exactly like `windows-release` proves the Windows side.
+
+- **Linux is the one verified beyond "it compiles" in this session,
+  not just scripted**: `scripts/package/linux-release.sh` builds
+  `runyx` with `-tags guinative` (the native WebKitGTK window, gated
+  behind that explicit tag precisely so `go test -race ./...` keeps
+  passing without GTK/WebKit dev packages installed -- see the
+  Windows entry above for why that tag exists), assembles a
+  `.desktop` entry (`assets/linux/runyx.desktop`) and a 16/32/48/256px
+  icon set (`assets/linux/icons/`, rasterized from the same mascot SVG
+  the Windows `.ico` came from), and packages all of it with `nfpm`
+  (`go install`ed fresh in this sandbox) into a real `.deb`, a real
+  Arch Linux `.pkg.tar.zst`, and a plain tarball.
+  - **Actually installed and run, not just built**: `dpkg -i`'d the
+    built `.deb` on this Debian-based sandbox, confirmed `runyx
+    version` ran from `/usr/bin/runyx` and the desktop file/icons
+    landed under `/usr/share/`, then ran `runyx` for real under
+    `xvfb-run` (a virtual X display -- this sandbox has no real one).
+    The GTK/WebKit process started and stayed up (not a crash loop),
+    printed the expected `libEGL`/DRI3 warnings for a GPU-less sandbox
+    (harmless -- WebKit falls back to software rendering) and nothing
+    worse, and its embedded daemon answered a real
+    `GET /api/tags` -> 200 on `127.0.0.1:11535`. Launched a second
+    `runyx` while the first was still running and confirmed it printed
+    "Runyx is already running" and exited instead of opening a
+    duplicate -- the single-instance logic working against a real
+    concurrent process, not just the unit tests' synthetic lock-file
+    scenarios. `dpkg -r`'d it afterward to leave the sandbox clean.
+    `.github/workflows/ci.yml`'s new `linux-release` job repeats the
+    build-install-smoke-test-uninstall sequence on every push, on a
+    fresh `ubuntu-latest` runner.
+  - Same `EventToken.h`-style naming problem as Windows, different
+    header: current Ubuntu/Debian/Arch all ship `webkit2gtk-4.1`, not
+    the `webkit2gtk-4.0` name `webview_go`'s bundled cgo directives
+    ask for by exact string. Worked around the same way -- a one-line
+    pkg-config alias generated at build time (`sed` on the real
+    `.pc` file), not a patch to the vendored dependency.
+  - `nfpm.yaml` needed `expand: true` on every `contents[]` entry for
+    its `${NFPM_PKGROOT}`/`${NFPM_VERSION}` env-var references to
+    actually substitute -- found by nfpm failing with a literal
+    "`Glob failed: ${NFPM_PKGROOT}/usr/bin/runyx: no matching files`"
+    until that was added; without it, nfpm silently treats `${...}` as
+    a literal path component.
+  - The Arch package was inspected (`.PKGINFO`, file layout, both
+    correct) but not installed -- no `pacman` on this Debian-based
+    sandbox. `scripts/package/PKGBUILD` (a from-source AUR build, as
+    opposed to nfpm's prebuilt binary package) was updated to match --
+    same `-tags guinative` build, same pkg-config shim, installs the
+    same desktop file/icons -- but `makepkg` itself was never run.
+- **macOS: real CI on real Apple hardware, nothing locally.** A cgo
+  build targeting Cocoa/WebKit cannot be cross-compiled from Linux the
+  way Windows' mingw-w64 handled cgo-targeting-Windows -- there is no
+  equivalent lightweight cross toolchain, and standing up osxcross
+  (unofficial, needs an extracted Apple SDK, licensing-gray, fragile)
+  was not attempted as disproportionate to what it would buy here.
+  Instead, `.github/workflows/ci.yml` gained a `darwin-release` job
+  that runs `scripts/package/macos-release.sh` directly on two of
+  GitHub's own macOS runners (`macos-13`, Intel; `macos-14`, Apple
+  Silicon) -- genuine macOS building the genuine Cocoa/WebKit backend
+  natively, no cross-compilation involved at all, which is actually
+  *stronger* verification than this sandbox could ever produce itself
+  even with a hypothetical working osxcross setup. The script produces
+  a real `Runyx.app` bundle: `Contents/MacOS/Runyx` (the binary, built
+  with `-tags guinative` same as Linux), a real `Runyx.icns` generated
+  the standard way (`sips` to resize `assets/mac/icon-1024.png` into
+  an `.iconset`, `iconutil -c icns`), and an `Info.plist` with the
+  bundle id/version/icon wired up. Not run here at all -- this is
+  100% unverified by this sandbox, verified only by the CI job itself
+  running on GitHub's infrastructure.
+- **Icon sources**: `assets/linux/icons/*.png` and
+  `assets/mac/icon-1024.png` are both rasterized (via `rsvg-convert`,
+  already installed for the Windows `.ico` earlier) from the exact
+  same `runyx-mascot-idle-dark.svg` the Windows icon came from, so all
+  three platforms show the same mascot, not three different ad hoc
+  renders.
+- **Not done here**: Homebrew (`runyx.rb`), `.rpm` (same `nfpm.yaml`
+  as the verified `.deb`/Arch targets, likely to work, not tried),
+  AppImage, Docker, winget -- unchanged from before this entry, still
+  tracked honestly in `scripts/package/README.md`'s status table.
+  `docs/MANUAL_TESTS.md` items 26-33 are the human checklist for
+  everything this sandbox genuinely could not verify (real window
+  rendering outside Xvfb, Arch `pacman -U`, every macOS item, the
+  per-OS offline flight-tests).
