@@ -53,8 +53,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - goos: windows
-            goarch: amd64
+          # windows/amd64 is intentionally not in this CGO_ENABLED=0
+          # matrix: it needs the real GUI build (cgo + mingw-w64 + the
+          # bundled WebView2 headers), built separately below.
           - goos: darwin
             goarch: amd64
           - goos: darwin
@@ -73,6 +74,34 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -o /tmp/runyx-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/runyx
+
+  windows-release:
+    # Builds the real Windows deliverable: Runyx.exe with the native
+    # WebView2 app window compiled in (cgo + mingw-w64, since this runs
+    # on an ubuntu-latest runner rather than on Windows itself), the
+    # mascot icon embedded, and no console window on double-click (see
+    # scripts/package/windows-release.sh for the details, including the
+    # EventToken.h case-mismatch shim mingw-w64 needs for the bundled
+    # WebView2.h to compile at all). windows/arm64 is not built here:
+    # Ubuntu's mingw-w64 packages only cross-compile to x86_64.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install mingw-w64 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+      - name: Build and package Runyx.exe
+        run: sh scripts/package/windows-release.sh "ci-${{ github.sha }}" /tmp/windows-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-windows-amd64
+          path: |
+            /tmp/windows-release/runyx-windows-amd64.zip
+            /tmp/windows-release/SHA256SUMS.txt
+          if-no-files-found: error
 
   web:
     runs-on: ubuntu-latest

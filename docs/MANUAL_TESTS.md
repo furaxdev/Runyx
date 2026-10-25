@@ -77,5 +77,70 @@ at the end of every milestone.
     `/api/runyx/remote/chat` actually reaches that service and returns a
     real completion.
 
+## Windows desktop app (native window, offline use)
+
+Everything in this section needs a real Windows machine: this sandbox
+cross-compiled and confirmed the binary (PE32+, GUI subsystem, correct
+icon resource) but never ran it, has no Windows to run it on, and has
+no WebView2 Runtime to test against. `go test -race ./...` here does
+cover `internal/guiwindow`'s fallback-chain logic and `cmd/runyx`'s
+single-instance/daemon-reuse logic directly, in isolation — these
+items are about the real, integrated, interactive experience.
+
+18. **Double-click opens a window, no console**: download
+    `runyx-windows-amd64.zip`, extract it, double-click `Runyx.exe`.
+    Confirm: a window opens showing the chat UI (no tabs, no address
+    bar), no console/terminal window appears at any point, and the
+    taskbar button shows the Runyx mascot icon and "Runyx" as the
+    title, not a generic Go/exe icon.
+19. **Single instance**: with Runyx already open, double-click
+    `Runyx.exe` again. Confirm a second window does *not* open and the
+    existing one keeps working.
+20. **Closing the window stops the daemon it started**: with Task
+    Manager open, confirm a `Runyx.exe` process is running once the
+    window is open, then close the window and confirm that process
+    exits (no orphaned daemon left running) within a few seconds.
+21. **Connects to, rather than duplicates, an existing daemon**: start
+    `Runyx.exe serve` from PowerShell first (headless), *then*
+    double-click `Runyx.exe`. Confirm the window opens pointed at the
+    already-running daemon instead of a second one failing to bind the
+    port, and confirm closing the window does *not* kill the `serve`
+    process (only a window this process itself started its own daemon
+    for should stop that daemon on close).
+22. **CLI output still works from a terminal**: from PowerShell, run
+    `Runyx.exe doctor` and `Runyx.exe version`. Confirm their output
+    prints to that same PowerShell window (proves the
+    AttachConsole/CONOUT$ reattachment in `console_windows.go` actually
+    works against a real console, not just that it compiles).
+23. **WebView2 missing -> falls back to a browser app window**: on a
+    machine confirmed *not* to have the WebView2 Runtime installed (a
+    fresh Windows Sandbox/VM without it; Windows 11 and recent Windows
+    10 ship it by default, so this needs a deliberately bare image),
+    double-click `Runyx.exe` and confirm a Microsoft Edge (or Chrome,
+    if installed) window opens in `--app=` mode (no tabs/address bar)
+    instead of crashing or silently doing nothing.
+24. **The actual offline flight-test, end to end**:
+    a. On a Windows machine *with* internet, double-click `Runyx.exe`,
+       go to the Models page, and download at least one small model
+       (e.g. a 1B-class GGUF) to completion.
+    b. Turn off Wi-Fi/Ethernet entirely (airplane mode or unplug).
+    c. Close Runyx if it's running, then double-click `Runyx.exe`
+       again. Confirm the window still opens normally with no network
+       connection present.
+    d. Select the model you downloaded and send it a message. Confirm
+       it loads and replies normally.
+    e. Confirm nothing in the UI errors out or hangs waiting on a
+       network call that will never complete (fonts, icons and scripts
+       are all bundled in `internal/webui/dist`, not fetched from a
+       CDN — verified in this sandbox by grepping the built UI for
+       external `http(s)://` references, but seeing it actually render
+       correctly offline on a real machine is the real test).
+25. **Installer** (optional item): with Inno Setup installed, run
+    `iscc scripts\package\runyx.iss` (after placing a built `Runyx.exe`
+    next to it) and confirm the resulting `runyx-setup.exe` installs
+    without admin rights, creates a Start Menu entry, and — if the
+    desktop-icon task is checked — a desktop shortcut, both launching
+    Runyx correctly.
+
 This list grows as later milestones add more hardware-dependent
 features (plugins, automation, distribution).

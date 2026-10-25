@@ -15,6 +15,32 @@ should verify.
 | `PKGBUILD` | Arch/AUR | No — no makepkg in this sandbox |
 | `nfpm.yaml` | .deb / .rpm | No — `nfpm` isn't installed here |
 | `winget-manifest.yaml` | Windows winget | No — submission is a PR to microsoft/winget-pkgs |
+| `windows-release.sh` | Windows `.exe`+zip | Partially — see below |
+| `runyx.iss` | Windows installer (Inno Setup) | No — no Windows/Wine/`iscc` in this sandbox |
+
+## Windows desktop app
+
+`windows-release.sh` cross-compiles the real Windows deliverable from
+Linux: `Runyx.exe` with a native WebView2 window compiled in (cgo +
+`gcc-mingw-w64-x86-64`/`g++-mingw-w64-x86-64`, which this sandbox
+installed to prove this), the `-H=windowsgui` linker flag (no console
+flash on double-click), the mascot icon embedded as a PE resource
+(`cmd/runyx/icon_windows.syso`, generated from
+`assets/mascot/svg/runyx-mascot-idle-dark.svg` via `rsvg-convert` +
+ImageMagick + `windres`), and the version baked in via `-ldflags`.
+Verified in this sandbox: the script runs end to end and produces a
+valid PE32+ GUI-subsystem binary with the icon resource present
+(checked with `wrestool -l`); `go test -race ./...` passes with
+`internal/guiwindow`'s fallback-chain logic and `cmd/runyx`'s
+single-instance/daemon-reuse logic unit tested. **Not verified**: the
+binary was never actually run, since there's no Windows machine or
+Wine here — see `docs/MANUAL_TESTS.md`'s Windows desktop app section
+for what a human needs to check on real hardware, including the full
+offline flight-test.
+
+`runyx.iss` is an Inno Setup script for an optional installer (Start
+Menu entry, optional desktop shortcut, no-admin-required install). Not
+built here — needs `iscc` on Windows or under Wine.
 
 ## Portable mode
 

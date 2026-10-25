@@ -639,3 +639,129 @@ for free once built, nothing extra needed there).
     `internal/agent/policy_test.go` and the new cases in
     `internal/agent/agent_test.go`, `internal/backend/fetch_test.go`,
     and `internal/convert/convert_test.go`.
+
+## 2026-10-25 — Runyx as a real Windows app: native window, not a browser tab
+
+Reported as a bug (v0.1.0, Windows): `runyx.exe` with no arguments
+tried to exec a sibling `runyx-tui.exe` that the release zip never
+included; `runyx.exe serve` only started the headless daemon and left
+the user to open a browser themselves. Neither is "a real Windows
+application" -- fixed by making a bare `runyx` (double-clicked or run
+with no arguments, on every OS, not just Windows) open an app-style
+window instead of the TUI, with `runyx tui` still available explicitly
+and `runyx serve` unchanged for the headless/server case.
+
+- **`internal/guiwindow`**: shows the daemon's URL in a window via
+  three tiers, each a worse experience than the one before it but
+  needing nothing the user has to install: (1) a true embedded native
+  webview (WebView2 on Windows via `github.com/webview/webview_go`,
+  WebKitGTK/Cocoa on Linux/macOS), (2) an installed browser's
+  `--app=url` mode (no tabs, no address bar, but a real browser
+  process), (3) the OS default browser. Tier selection is build-tag
+  driven, not a runtime feature flag:
+  - `native_cgo_windows.go` (`cgo && windows`): always compiled into
+    the Windows build (cgo is mandatory there specifically for this).
+    Before ever calling into the C++ webview library, checks the
+    WebView2 Evergreen Runtime's own registry marker
+    (`...\EdgeUpdate\Clients\{F3017226-...}`'s `pv` value, the same
+    check Microsoft's own guidance uses) and falls through to tier 2 if
+    it's absent, rather than risking a crash deep in WebView2's native
+    init code that Go's `recover()` cannot catch if it aborts the
+    process instead of raising a catchable exception.
+  - `native_other_guinative.go` (`cgo && !windows && guinative`): the
+    Linux/macOS equivalent, gated behind an explicit `-tags guinative`
+    opt-in on top of cgo, not "compiles whenever cgo happens to be
+    on". That distinction matters because `go test -race ./...`
+    enables cgo for the race detector on every platform, including
+    this project's own `ubuntu-latest` CI runner, which doesn't have
+    `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` installed -- without the
+    opt-in tag, this package must not make that otherwise-unrelated
+    `-race` run suddenly require them.
+  - `native_other_stub.go` (`cgo && !windows && !guinative`) and
+    `native_stub.go` (`!cgo`): both just return `ErrNoNativeWindow`,
+    letting `Open` fall through to tiers 2/3. Verified in this sandbox:
+    installed `libgtk-3-dev` + `libwebkit2gtk-4.1-dev` (Ubuntu 24.04
+    only ships the `4.1`-suffixed package; webview_go's bundled cgo
+    directives ask for `webkit2gtk-4.0` by name, so a local
+    `webkit2gtk-4.0.pc` pkg-config alias was needed to prove
+    `-tags guinative` actually compiles against real GTK/WebKit2GTK --
+    not committed to the repo, since it's a dev-environment-only
+    naming workaround, not something Runyx ships) and confirmed
+    `go build ./internal/guiwindow/...` succeeds; confirmed
+    `CGO_ENABLED=1 go build ./...` with *no* guinative tag and *no*
+    pkg-config shim also succeeds (the actual CI configuration), and
+    that `go test -race ./...` passes end to end.
+- **Windows cross-compile from Linux**: installed
+  `gcc-mingw-w64-x86-64`/`g++-mingw-w64-x86-64` and proved a full
+  `GOOS=windows GOARCH=amd64 CGO_ENABLED=1` build of `./cmd/runyx`
+  succeeds, producing a real PE32+ binary. One real obstacle:
+  webview_go's bundled `WebView2.h` `#include`s `"EventToken.h"`
+  (capital letters), but mingw-w64's own bundled Windows SDK headers
+  spell the file `eventtoken.h` -- a hard failure on this
+  case-sensitive filesystem. Fixed with a one-line shim header
+  (`EventToken.h` that just `#include`s `eventtoken.h`) added first on
+  the include path via `CGO_CFLAGS`/`CGO_CXXFLAGS`; see
+  `scripts/package/windows-release.sh`, which does this and is what
+  `.github/workflows/ci.yml`'s new `windows-release` job calls.
+  windows/arm64 is not attempted: Ubuntu's mingw-w64 packages only
+  cross-compile to x86_64, not aarch64.
+- **No console flash on double-click, but CLI output still works from
+  a terminal**: built with `-ldflags -H=windowsgui` (no console
+  subsystem), which also means a GUI-subsystem process starts with
+  *no* stdio handles at all -- not just a hidden console, none --
+  which would otherwise make `runyx.exe doctor`/`serve`/etc. silently
+  produce no visible output when run from an existing PowerShell/cmd
+  window. `cmd/runyx/console_windows.go` calls `AttachConsole
+  (ATTACH_PARENT_PROCESS)` as the very first thing `main()` does and
+  reopens `os.Stdout`/`os.Stderr`/`os.Stdin` against `CONOUT$`/`CONIN$`
+  when it succeeds; when there's no parent console (the double-click
+  case), `AttachConsole` just fails and this is a no-op, which is
+  exactly the point. `console_other.go` is the (empty) non-Windows
+  stub -- this is a Windows-subsystem-specific problem, nothing else
+  needs it.
+- **Single instance + daemon reuse** (`cmd/runyx/cmd_gui.go`):
+  `acquireSingleInstance` wins outright via an atomically-created lock
+  file (`O_CREATE|O_EXCL` is race-free across processes at the OS
+  level, so no platform-specific PID-liveness syscalls are needed); if
+  the lock file already exists, it checks whether a daemon actually
+  answers at the configured address before deciding what that means --
+  reachable means a real instance (this GUI or even a plain
+  `runyx serve`) is genuinely running, so this process backs off;
+  unreachable means the lock is stale (left behind by a crash, not a
+  clean shutdown that would have removed it), so it's cleaned up and
+  retried once. `ensureDaemonRunning` reuses an already-reachable
+  daemon instead of starting a second one, and only the window that
+  actually started its own daemon stops it when the window closes.
+- **Taskbar icon**: `assets/mascot/svg/runyx-mascot-idle-dark.svg`
+  rasterized at 16/32/48/256px (`rsvg-convert` via ImageMagick's
+  `convert`, after installing `librsvg2-bin` -- plain ImageMagick alone
+  has no SVG rasterizer of its own) and combined into
+  `cmd/runyx/runyx.ico` (checked with `wrestool -l` after building:
+  all 4 sizes present as `RT_ICON` plus one `RT_GROUP_ICON`), embedded
+  via `cmd/runyx/icon_windows.rc` + `x86_64-w64-mingw32-windres` ->
+  `cmd/runyx/icon_windows.syso`, which Go links in automatically for
+  windows builds by filename convention (`name_windows.syso`) with no
+  extra build flag needed, and which a plain Linux/macOS build simply
+  never sees.
+- **Offline by default**: `internal/webui/dist` (the built web UI) was
+  grepped for external `http(s)://` references -- the only hit is an
+  XML namespace URI string (`http://www.w3.org/2000/svg`) inside an
+  SVG, not a network fetch. No new network call was introduced by any
+  of the above; `cmdGUI`'s daemon-start path reuses `cmdServe`'s
+  existing backend-resolution logic unchanged (already tolerant of no
+  network -- see `resolveBackendBinary`'s doc comment from M1).
+  Verifying this holds on a real offline Windows machine, after a
+  model has actually been downloaded, needs a human with that machine
+  -- see `docs/MANUAL_TESTS.md`'s new "Windows desktop app" section,
+  item 24 specifically, which is the full airplane-mode flight test.
+- **Installer**: `scripts/package/runyx.iss` is a real Inno Setup
+  script (Start Menu entry, optional desktop shortcut, no admin rights
+  required since Runyx is portable-by-default) but was never compiled
+  -- no Windows, no Wine, no `iscc` in this sandbox. See
+  `scripts/package/README.md`.
+- **Not done here**: actually running any of this on Windows. Every
+  claim above that says "proved"/"confirmed" is about what compiles
+  and what the unit tests cover; the interactive, real-WebView2,
+  real-offline experience needs a human on real Windows hardware --
+  `docs/MANUAL_TESTS.md` items 18-25 are exactly that checklist, in
+  the order a reviewer should work through them.
