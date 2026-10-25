@@ -132,18 +132,21 @@ jobs:
       - name: Build Runyx.exe natively
         run: |
           set -eu
-          # Same EventToken.h case-mismatch mingw-w64 hits when
-          # cross-compiling from Linux (see windows-release.sh) --
-          # Chocolatey's mingw package bundles the same upstream
-          # mingw-w64 SDK headers, lowercase eventtoken.h included.
-          mkdir -p /tmp/mingw-shim
-          printf '#include "eventtoken.h"\n' > /tmp/mingw-shim/EventToken.h
+          # No EventToken.h shim needed here, unlike windows-release.sh's
+          # Linux-hosted cross-compile: that shim relies on
+          # "EventToken.h" and "eventtoken.h" being two different files,
+          # true on a case-sensitive filesystem (ext4) but not on
+          # Windows' NTFS, which is case-preserving but case-INSENSITIVE
+          # -- the two names resolve to the very same file there. The
+          # first attempt at this job created the shim anyway and hit
+          # infinite self-inclusion recursion (the shim's own
+          # "#include eventtoken.h" resolved right back to itself).
+          # mingw-w64's real eventtoken.h already satisfies
+          # WebView2.h's "EventToken.h" include directly on Windows.
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           VERSION="ci-${{ github.sha }}"
           export CGO_ENABLED=1
-          export CGO_CFLAGS="-I/tmp/mingw-shim"
-          export CGO_CXXFLAGS="-I/tmp/mingw-shim"
           go build -ldflags "-H=windowsgui -X github.com/furaxdev/runyx/internal/version.Version=$VERSION -X github.com/furaxdev/runyx/internal/version.Commit=$COMMIT -X github.com/furaxdev/runyx/internal/version.BuildDate=$BUILD_DATE" \
             -o scripts/package/Runyx.exe ./cmd/runyx
       - name: Compile the installer with Inno Setup
