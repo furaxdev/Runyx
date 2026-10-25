@@ -1,0 +1,99 @@
+name: installeur-windows
+
+# Fabrique RunyxSetup-<version>.exe sur une machine Windows, et le publie
+# dans la release. L'etape de signature est prete mais dormante : elle
+# s'active le jour ou le secret SIGNING_PFX_BASE64 existe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version a empaqueter (tag de release)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  installeur:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Outils
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Recuperer le binaire et le moteur
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          $zip = "runyx-windows-amd64.zip"
+          Invoke-WebRequest -Uri "https://github.com/furaxdev/Runyx/releases/download/$v/$zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath stage -Force
+          $exe = Get-ChildItem -Path stage -Filter runyx.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "runyx.exe introuvable dans l'archive" }
+          Copy-Item $exe.FullName runyx.exe
+
+          # le moteur : build CPU windows officiel de llama.cpp
+          $rel = Invoke-RestMethod "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+          $asset = $rel.assets | Where-Object { $_.name -like "*bin-win-cpu-x64.zip" } | Select-Object -First 1
+          if ($asset) {
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile engine.zip
+            Expand-Archive -Path engine.zip -DestinationPath engine -Force
+            New-Item -ItemType Directory -Force -Path backend | Out-Null
+            Get-ChildItem -Path engine -Include *.exe,*.dll -Recurse | Copy-Item -Destination backend -Force
+          }
+          Get-ChildItem backend | Select-Object -First 12 Name, Length
+
+      - name: Icone
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pillow
+          python -c "from PIL import Image, ImageDraw; im=Image.new('RGBA',(256,256),(47,75,124,255)); d=ImageDraw.Draw(im); d.ellipse((40,40,216,216),fill=(255,255,255,255)); d.text((108,104),'R',fill=(47,75,124,255)); im.save('runyx.ico',sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: Fabriquer l'installeur
+        shell: pwsh
+        run: |
+          Copy-Item runyx-installer.iss .
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" runyx-installer.iss
+          Get-ChildItem dist
+
+      - name: Signer (seulement si un certificat existe)
+        if: ${{ env.SIGNING_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          $setup = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          $ts = "http://timestamp.digicert.com"
+          & signtool sign /f $pfx /p $env:SIGNING_PFX_PASSWORD /tr $ts /td sha256 /fd sha256 $setup.FullName
+
+      - name: Empreinte
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          $h = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower()
+          "$h  $($setup.Name)" | Out-File -Encoding ascii dist/SHA256SUMS-installeur.txt
+          Get-Content dist/SHA256SUMS-installeur.txt
+
+      - name: Publier dans la release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          $setup = (Get-ChildItem dist -Filter *.exe | Select-Object -First 1).FullName
+          gh release upload $v $setup dist/SHA256SUMS-installeur.txt --clobber --repo furaxdev/Runyx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installeur-windows
+          path: dist/*
+          retention-days: 7
