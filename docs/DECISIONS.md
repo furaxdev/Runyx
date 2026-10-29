@@ -921,3 +921,38 @@ verified rather than just a script nobody had run.
   the installer wizard *looks* right or that Start Menu/Dock entries
   actually open the app when clicked. `docs/MANUAL_TESTS.md` items 25
   and 31-32 are exactly that remaining by-eye checklist.
+
+## 2026-10-26 — `darwin-release`'s Intel (macos-13) leg dropped: a real CI capacity problem, not a code bug
+
+The PR's CI run showed every job green except `darwin-release
+(macos-13, amd64)`, which sat `queued` for a full 24 hours with no
+runner ever picked up, then GitHub cancelled it and the whole
+workflow run along with it (a queued job that long is past GitHub's
+own timeout, not this job doing anything wrong). That's a runner-pool
+availability problem on this account/repo for the `macos-13` label,
+not a flake to retry past and not something the workflow or the
+packaging script caused -- `darwin-release (macos-14, arm64)` on the
+very same run, same commit, started within seconds and passed
+end to end (build, `.pkg`, real `installer -pkg` install, smoke test).
+
+Rather than guess at another Intel-capable runner label without being
+able to confirm it's actually available on this account (another
+24-hour stall would cost a full day to find out), `darwin-release`'s
+matrix was removed and the job now just runs on `macos-14` (Apple
+Silicon) directly, no `amd64` leg. This means:
+
+- `runyx-darwin-arm64.zip` and the `Runyx-<version>-Installer-arm64.pkg`
+  installer are still built and installed-and-verified for real on
+  every push, exactly as before.
+- **No `darwin-amd64`/Intel `Runyx.app` or installer is built by CI
+  right now.** `scripts/package/macos-release.sh` itself is
+  architecture-agnostic (it just builds for `go env GOARCH`, whatever
+  that is on the machine running it) -- an Intel Mac, or a CI runner
+  on a label this account's plan actually has capacity for, can still
+  produce one by running the script directly. Re-adding an automated
+  Intel leg needs someone who can check (or has access to adjust) this
+  account's actual GitHub Actions runner availability, which this
+  session cannot do from here.
+- `cross-compile (darwin, amd64)` (the plain `CGO_ENABLED=0`
+  static-binary job, no window) is unaffected -- that one already runs
+  fine on `ubuntu-latest`, since it doesn't need cgo/Cocoa at all.

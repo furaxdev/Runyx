@@ -181,15 +181,20 @@ to see the actual window render and interact with it normally.
 ## macOS desktop app
 
 `.github/workflows/ci.yml`'s `darwin-release` job builds a real
-`Runyx.app` *and* a real `Runyx-<version>-Installer-<arch>.pkg` on
-GitHub's own `macos-13`/`macos-14` runners on every push, and actually
+`Runyx.app` *and* a real `Runyx-<version>-Installer-arm64.pkg` on a
+GitHub `macos-14` (Apple Silicon) runner on every push, and actually
 installs the `.pkg` with macOS's own `installer -pkg ... -target /`
 command-line tool, confirming `Runyx.app` lands in `/Applications` and
-runs -- a genuine, automated install round trip. What's below is the
+runs -- a genuine, automated install round trip. There's no Intel/
+`amd64` artifact right now (the `macos-13` runner this used to also
+build on sat queued 24h with no runner ever available and was dropped
+-- see `docs/DECISIONS.md`); everything below applies equally to an
+Intel build someone produces by running `scripts/package/
+macos-release.sh` on real Intel hardware. What's below is the
 interactive, by-eye part no CI job can check.
 
 31. **Gatekeeper on first launch**: download the `.pkg` (or
-    `runyx-darwin-arm64.zip`/`-amd64.zip` for the bare `.app`) from the
+    `runyx-darwin-arm64.zip` for the bare `.app`) from the
     `darwin-release` CI artifact and actually run the installer /
     double-click `Runyx.app`. Since it's unsigned and unnotarized,
     macOS will refuse to open it the first time ("cannot be opened

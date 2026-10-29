@@ -11,7 +11,7 @@ should still verify by hand.
 | `runyx.iss` | Windows installer (`Runyx-<version>-Installer.exe`, Inno Setup) | **Yes** — built, silently installed, launched, and silently uninstalled for real on a native `windows-latest` GitHub Actions runner (`windows-installer` job); never run on this sandbox (no Windows/Wine here) — see below |
 | `linux-release.sh` + `nfpm.yaml` | `.deb` / Arch Linux package / tarball | **Yes** — built, installed via `dpkg -i`, and actually launched under Xvfb on this sandbox; see below |
 | `PKGBUILD` | Arch/AUR (from-source build) | No `makepkg`/Arch machine here, but builds the exact same `-tags guinative` binary the nfpm Arch package above does, which *was* run |
-| `macos-release.sh` | macOS `Runyx.app`+zip, `Runyx-<version>-Installer-<arch>.pkg` | Not run in this sandbox (no macOS); the `.app` *and* the `.pkg` installer are both built and the `.pkg` is actually installed via `installer -pkg` for real in CI's `darwin-release` job, on GitHub's own `macos-13`/`macos-14` runners — see below |
+| `macos-release.sh` | macOS `Runyx.app`+zip, `Runyx-<version>-Installer-arm64.pkg` | Not run in this sandbox (no macOS); the `.app` *and* the `.pkg` installer are both built and the `.pkg` is actually installed via `installer -pkg` for real in CI's `darwin-release` job, on a GitHub `macos-14` (Apple Silicon) runner — see below. No Intel/`amd64` leg right now: `macos-13` sat queued 24h with no runner ever available and was dropped rather than guessed at again |
 | `runyx.rb` | Homebrew (macOS/Linux) | No — no brew in this sandbox |
 | `nfpm.yaml` (.rpm) | `.rpm` | No — not built here, same tool as the verified `.deb`/Arch targets above so likely to work, but unverified |
 | `winget-manifest.yaml` | Windows winget | No — submission is a PR to microsoft/winget-pkgs |
@@ -103,14 +103,19 @@ Windows' mingw-w64 there is no practical way to cross-compile a cgo
 Cocoa/WebKit binary from Linux (would need a full macOS SDK + osxcross
 setup, fragile and not attempted). Instead,
 `.github/workflows/ci.yml`'s `darwin-release` job runs this script on
-two of GitHub's own macOS runners (`macos-13`, an Intel machine, and
-`macos-14`, Apple Silicon), building the `.app` and the `.pkg`
-natively, then **actually installs the `.pkg`** with macOS's own
-`installer -pkg ... -target /` command-line tool, confirms
+a GitHub `macos-14` (Apple Silicon) runner, building the `.app` and
+the `.pkg` natively, then **actually installs the `.pkg`** with
+macOS's own `installer -pkg ... -target /` command-line tool, confirms
 `Runyx.app` landed in `/Applications` and runs (`Runyx version`), and
 removes it again -- a real install round trip on genuine macOS
 hardware/VMs, automated, on every push; the strongest verification
-available without a Mac in hand. See `docs/MANUAL_TESTS.md` for what a
+available without a Mac in hand. **No Intel/`amd64` build right now**:
+the matrix originally also had a `macos-13` (Intel) leg, but that
+runner label sat queued 24 hours with no runner ever picked up on this
+account and was dropped rather than guessed at again -- the script
+itself still builds whatever `go env GOARCH` is on the machine running
+it, so an Intel Mac (or a working Intel-capable runner label) can
+still produce one directly. See `docs/MANUAL_TESTS.md` for what a
 human still needs to check by actually opening the installed `.app`
 (first-launch Gatekeeper prompt since it's unsigned/unnotarized, the
 window itself, offline behavior).

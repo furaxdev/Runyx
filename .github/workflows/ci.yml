@@ -212,23 +212,24 @@ jobs:
           if-no-files-found: error
 
   darwin-release:
-    # Builds the real macOS deliverable on actual macOS runners (no
+    # Builds the real macOS deliverable on an actual macOS runner (no
     # cross-compile trickery needed, or possible, for a cgo + Cocoa/
     # WebKit build): a genuine Runyx.app bundle with the native window
     # compiled in and a real .icns generated from the mascot icon via
-    # the standard sips/iconutil toolchain. One job per arch, each
-    # building natively on a runner of that architecture -- GOARCH set
-    # to amd64/arm64 would still need the other arch's clang target,
-    # which cgo cross-arch builds don't handle for free the way plain
-    # Go cross-compilation does.
-    strategy:
-      matrix:
-        include:
-          - runner: macos-13 # Intel
-            goarch: amd64
-          - runner: macos-14 # Apple Silicon
-            goarch: arm64
-    runs-on: ${{ matrix.runner }}
+    # the standard sips/iconutil toolchain. GOARCH set to amd64/arm64
+    # would still need the other arch's clang target, which cgo
+    # cross-arch builds don't handle for free the way plain Go
+    # cross-compilation does, so this needs a runner of the matching
+    # architecture, not a matrix entry.
+    #
+    # Intel (macos-13, amd64) isn't built here: that runner sat queued
+    # for 24h with zero progress on a real run of this job and was
+    # then cancelled by GitHub -- not a flake, a capacity/availability
+    # problem with that runner pool on this account, confirmed by a
+    # second run hitting the exact same stall. Re-adding an Intel leg
+    # needs a runner label actually available here, which hasn't been
+    # verified; see docs/DECISIONS.md.
+    runs-on: macos-14 # Apple Silicon
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -247,9 +248,9 @@ jobs:
           sudo rm -rf /Applications/Runyx.app
       - uses: actions/upload-artifact@v4
         with:
-          name: runyx-darwin-${{ matrix.goarch }}
+          name: runyx-darwin-arm64
           path: |
-            /tmp/darwin-release/runyx-darwin-${{ matrix.goarch }}.zip
+            /tmp/darwin-release/runyx-darwin-arm64.zip
             /tmp/darwin-release/*.pkg
             /tmp/darwin-release/SHA256SUMS.txt
           if-no-files-found: error
