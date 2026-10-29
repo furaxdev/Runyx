@@ -153,17 +153,32 @@ jobs:
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.0.0-ci /DSourceExe=Runyx.exe scripts\package\runyx.iss
-      - name: Smoke-test the installer silently, confirm it actually installs
+      - name: Smoke-test the installer silently, confirm it actually installs and configures
         shell: pwsh
         run: |
           $installer = Get-ChildItem scripts\package\Output\*.exe | Select-Object -First 1
-          Start-Process -FilePath $installer.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          # /TASKS selects every configuration checkbox the wizard
+          # offers, so this proves the config steps actually do what
+          # their descriptions say, not just that Runyx.exe got copied.
+          Start-Process -FilePath $installer.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon,startupicon,addtopath" -Wait
           $installed = "$env:LOCALAPPDATA\Programs\Runyx\Runyx.exe"
           if (-not (Test-Path $installed)) { throw "Runyx.exe not found after silent install at $installed" }
           & $installed version
+
+          $desktopShortcut = "$env:USERPROFILE\Desktop\Runyx.lnk"
+          if (-not (Test-Path $desktopShortcut)) { throw "desktop shortcut not created despite /TASKS=desktopicon" }
+          $startupShortcut = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Runyx.lnk"
+          if (-not (Test-Path $startupShortcut)) { throw "startup shortcut not created despite /TASKS=startupicon" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -notlike "*Programs\Runyx*") { throw "install dir not added to user PATH despite /TASKS=addtopath" }
+
           $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\Runyx\unins*.exe" | Select-Object -First 1
           Start-Process -FilePath $uninstaller.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
           if (Test-Path $installed) { throw "Runyx.exe still present after silent uninstall" }
+          if (Test-Path $desktopShortcut) { throw "desktop shortcut still present after uninstall" }
+          if (Test-Path $startupShortcut) { throw "startup shortcut still present after uninstall" }
+          $userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPathAfter -like "*Programs\Runyx*") { throw "install dir still in user PATH after uninstall" }
       - uses: actions/upload-artifact@v4
         with:
           name: runyx-windows-installer
@@ -196,7 +211,9 @@ jobs:
         run: sh scripts/package/linux-release.sh "ci-${{ github.sha }}" /tmp/linux-release
       - name: Install and smoke-test the built .deb on this runner
         run: |
-          sudo dpkg -i /tmp/linux-release/*.deb
+          set -eu
+          sudo dpkg -i /tmp/linux-release/*.deb | tee /tmp/dpkg-install.log
+          grep -q "Runyx is installed" /tmp/dpkg-install.log
           runyx version
           test -f /usr/share/applications/runyx.desktop
           test -f /usr/share/icons/hicolor/256x256/apps/runyx.png

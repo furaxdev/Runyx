@@ -81,10 +81,18 @@ cp "$REPO_ROOT/assets/linux/icons/runyx-48.png" "$PKG_ROOT/usr/share/icons/hicol
 cp "$REPO_ROOT/assets/linux/icons/runyx-256.png" "$PKG_ROOT/usr/share/icons/hicolor/256x256/apps/runyx.png"
 
 echo "Packaging .deb and Arch Linux packages with nfpm (package version: $PKG_VERSION)..."
-NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
-  nfpm package --config "$REPO_ROOT/scripts/package/nfpm.yaml" --packager deb --target "$OUT_DIR/"
-NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
-  nfpm package --config "$REPO_ROOT/scripts/package/nfpm.yaml" --packager archlinux --target "$OUT_DIR/"
+# nfpm resolves nfpm.yaml's relative `scripts.postinstall: ./postinstall.sh`
+# against the current working directory, not the config file's own
+# directory -- cd there first so both nfpm.yaml and postinstall.sh
+# resolve correctly regardless of where this script itself was invoked
+# from.
+(
+  cd "$REPO_ROOT/scripts/package"
+  NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
+    nfpm package --config nfpm.yaml --packager deb --target "$OUT_DIR/"
+  NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
+    nfpm package --config nfpm.yaml --packager archlinux --target "$OUT_DIR/"
+)
 
 # Also ship a plain tarball (binary + desktop file + icons, same
 # layout as the packages above minus the package manager metadata) for
@@ -93,13 +101,15 @@ NFPM_VERSION="$PKG_VERSION" NFPM_PKGROOT="$PKG_ROOT" \
 TARBALL_ROOT="$WORK_DIR/tarball/runyx-$VERSION"
 mkdir -p "$TARBALL_ROOT"
 cp -r "$PKG_ROOT/." "$TARBALL_ROOT/"
+cp "$REPO_ROOT/scripts/package/postinstall.sh" "$TARBALL_ROOT/postinstall.sh"
+chmod +x "$TARBALL_ROOT/postinstall.sh"
 cat > "$TARBALL_ROOT/install.sh" <<'EOF'
 #!/bin/sh
 # Installs this tarball's contents under / (needs root: run with sudo).
 set -eu
 cd "$(dirname "$0")"
 cp -r usr/* /usr/
-echo "Installed. Run 'runyx' from a terminal or find it in your application menu."
+./postinstall.sh
 EOF
 chmod +x "$TARBALL_ROOT/install.sh"
 (cd "$WORK_DIR/tarball" && tar -czf "$OUT_DIR/runyx-linux-amd64.tar.gz" "runyx-$VERSION")

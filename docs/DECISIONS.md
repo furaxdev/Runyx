@@ -956,3 +956,74 @@ Silicon) directly, no `amd64` leg. This means:
 - `cross-compile (darwin, amd64)` (the plain `CGO_ENABLED=0`
   static-binary job, no window) is unaffected -- that one already runs
   fine on `ubuntu-latest`, since it doesn't need cgo/Cocoa at all.
+
+## 2026-10-26 — Branded, configuring installers on every OS, not just plumbing
+
+Follow-up to the three plain installers above: "a setup with custom UI
+that installs Runyx, configures it." All three already worked
+mechanically (CI proved real install/uninstall round trips); what was
+missing was Runyx's own branding on the wizard itself, and actual
+configuration choices beyond "copy the file."
+
+- **Windows (`runyx.iss`)**: `WizardImageFile`/`WizardSmallImageFile`
+  now point at `installer-assets/WizardImage.bmp` (164x314) and
+  `WizardSmallImage.bmp` (55x58) -- the same mascot the taskbar icon
+  uses, rendered onto Runyx's own navy (`#1B2233`) with `rsvg-convert`
+  + ImageMagick (`-filter point` on the resizes so the pixel art stays
+  crisp instead of blurring), plus a custom `[Messages]` welcome
+  page text, instead of Inno Setup's generic default banner/text. Three
+  real configuration tasks were added, not just the pre-existing
+  desktop-icon checkbox: **start Runyx at sign-in** (adds a shortcut to
+  `{userstartup}`) and **add Runyx to PATH** (a `[Code]` Pascal
+  section that read-modify-writes `HKCU\Environment\Path`, the
+  standard Inno Setup idiom for a per-user PATH entry, with matching
+  cleanup in `CurUninstallStepChanged`). `.github/workflows/ci.yml`'s
+  `windows-installer` job now silently installs with
+  `/TASKS=desktopicon,startupicon,addtopath` and actually checks all
+  three configuration effects landed (the desktop/startup `.lnk`
+  files exist, `HKCU`'s `Path` contains the install dir) *and* that
+  uninstall cleanly reverses every one of them -- not just that
+  `Runyx.exe` got copied.
+- **macOS (`macos-release.sh`)**: upgraded from a bare `pkgbuild`
+  component package to a `productbuild` distribution package --
+  `pkgbuild` still builds the underlying component, but it's now
+  wrapped with a `distribution.xml` that points
+  `installer-gui-script` at a branded welcome page
+  (`installer-assets-mac/welcome.html`) and background image
+  (`installer-assets-mac/background.png`, the same mascot-on-navy
+  treatment as the Windows wizard image, generated the same way),
+  so Installer.app shows Runyx's own branding instead of a bare
+  generic page. `darwin-release`'s existing `installer -pkg ...
+  -target /` smoke test exercises this unchanged, since the resulting
+  `.pkg` installs identically either way -- this is purely the
+  installer's visual presentation, not a change to what it does.
+- **Linux (`.deb`/Arch, `postinstall.sh`)**: dpkg/pacman are
+  command-line tools with no GUI of their own, so there's no
+  equivalent of a graphical wizard to brand here -- the realistic
+  ceiling is a message printed right after install. `nfpm.yaml` gained
+  a `scripts.postinstall` pointing at a new `postinstall.sh`, which
+  nfpm turns into both dpkg's `postinst` and pacman's `.INSTALL`
+  post_install hook from one script: a small ANSI-block-character
+  rendering of the mascot (no image-in-terminal protocol is
+  universal, but ANSI 256-color is) in the same navy/blue/cream
+  palette, followed by exactly how to actually start Runyx
+  (`runyx`, `runyx doctor`, `runyx serve`). **Actually run, not just
+  written**: installed the rebuilt `.deb` with `dpkg -i` on this
+  sandbox and watched the welcome message print for real during
+  `Setting up runyx (...)`.  Found and fixed a real bug doing this:
+  nfpm resolves a relative `scripts.postinstall` path against the
+  *current working directory*, not `nfpm.yaml`'s own directory, so
+  `./postinstall.sh` only worked once `linux-release.sh` was changed
+  to `cd` into `scripts/package/` before invoking `nfpm package` (it
+  previously ran from the repo root). `.github/workflows/ci.yml`'s
+  `linux-release` job now also greps the real `dpkg -i` output for
+  "Runyx is installed" so a future regression here fails loudly
+  instead of silently losing the welcome message. The same
+  `postinstall.sh` is copied into the plain tarball's `install.sh`
+  too, for anyone installing that instead of a real package.
+- **Not done**: a GUI wrapper for the Linux install path (a `.run`
+  self-extracting script with a `zenity`/Qt first-run dialog) was
+  considered and skipped as disproportionate effort for a "nice to
+  have" beyond what dpkg/pacman already give every Linux user by
+  convention (a terminal they just used to install it in the first
+  place).

@@ -2,8 +2,8 @@
 # Builds the real macOS release artifact: Runyx.app, a minimal but
 # genuine app bundle with the native Cocoa/WebKit window compiled in
 # (cgo; no cross-compile trickery needed since this is meant to run
-# directly on macOS -- a GOARCH matching the host, e.g. in CI's
-# macos-13 (amd64) / macos-14 (arm64) runners).
+# directly on macOS -- a GOARCH matching the host, e.g. CI's macos-14
+# (arm64) runner).
 #
 # Requires: a Go toolchain and Xcode command line tools (clang,
 # iconutil, sips -- all preinstalled on GitHub's macos-* runners and
@@ -100,18 +100,57 @@ EOF
 ARCHIVE_NAME="runyx-darwin-$GOARCH_BUILD.zip"
 (cd "$WORK_DIR" && zip -qry "$OUT_DIR/$ARCHIVE_NAME" Runyx.app)
 
-# The real installer: a double-clickable .pkg (built with pkgbuild,
-# part of Xcode command line tools -- no extra tool needed) that runs
-# macOS's own Installer.app, installs Runyx.app into /Applications,
-# and needs nothing from the user beyond clicking through it. This is
-# macOS's equivalent of the Windows Inno Setup installer
-# (scripts/package/runyx.iss) -- same idea, platform-native mechanism.
-PKG_NAME="Runyx-$PKG_VERSION-Installer-$GOARCH_BUILD.pkg"
+# The real installer: a double-clickable .pkg that runs macOS's own
+# Installer.app, installs Runyx.app into /Applications, and needs
+# nothing from the user beyond clicking through it. Built in two
+# steps, both part of Xcode command line tools (no extra dependency):
+# pkgbuild wraps Runyx.app into a plain component package, then
+# productbuild wraps *that* into a distribution package with Runyx's
+# own branding -- a welcome page (installer-assets-mac/welcome.html)
+# and a background image with the mascot
+# (installer-assets-mac/background.png, same navy/mascot art the
+# Windows installer's wizard banner uses) -- so the installer looks
+# like it belongs to Runyx instead of a bare generic Installer.app
+# page. Same idea as the Windows Inno Setup installer
+# (scripts/package/runyx.iss), platform-native mechanism.
+COMPONENT_PKG="$WORK_DIR/component.pkg"
 pkgbuild \
   --component "$APP" \
   --install-location /Applications \
   --identifier com.runyx.app \
   --version "$PKG_VERSION" \
+  "$COMPONENT_PKG"
+
+DIST_DIR="$WORK_DIR/dist"
+mkdir -p "$DIST_DIR"
+cp "$REPO_ROOT/scripts/package/installer-assets-mac/background.png" "$DIST_DIR/background.png"
+cp "$REPO_ROOT/scripts/package/installer-assets-mac/welcome.html" "$DIST_DIR/welcome.html"
+cat > "$DIST_DIR/distribution.xml" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>Runyx</title>
+    <background file="background.png" alignment="topleft" scaling="none"/>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.runyx.app"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.runyx.app" visible="false">
+        <pkg-ref id="com.runyx.app"/>
+    </choice>
+    <pkg-ref id="com.runyx.app" version="$PKG_VERSION" onConclusion="none">component.pkg</pkg-ref>
+</installer-gui-script>
+EOF
+cp "$COMPONENT_PKG" "$DIST_DIR/component.pkg"
+
+PKG_NAME="Runyx-$PKG_VERSION-Installer-$GOARCH_BUILD.pkg"
+productbuild \
+  --distribution "$DIST_DIR/distribution.xml" \
+  --package-path "$DIST_DIR" \
+  --resources "$DIST_DIR" \
   "$OUT_DIR/$PKG_NAME"
 
 (cd "$OUT_DIR" && { sha256sum "$ARCHIVE_NAME" "$PKG_NAME" 2>/dev/null || shasum -a 256 "$ARCHIVE_NAME" "$PKG_NAME"; } >> SHA256SUMS.txt)

@@ -8,8 +8,8 @@ should still verify by hand.
 | File | Target | Verified here? |
 |---|---|---|
 | `windows-release.sh` | Windows `Runyx.exe`+zip | Build verified (sandbox cross-compile + a real `windows-release` GitHub Actions run); never actually run on Windows itself |
-| `runyx.iss` | Windows installer (`Runyx-<version>-Installer.exe`, Inno Setup) | **Yes** — built, silently installed, launched, and silently uninstalled for real on a native `windows-latest` GitHub Actions runner (`windows-installer` job); never run on this sandbox (no Windows/Wine here) — see below |
-| `linux-release.sh` + `nfpm.yaml` | `.deb` / Arch Linux package / tarball | **Yes** — built, installed via `dpkg -i`, and actually launched under Xvfb on this sandbox; see below |
+| `runyx.iss` | Windows installer, branded wizard (`Runyx-<version>-Installer.exe`, Inno Setup) | **Yes** — built, silently installed with every config task enabled, confirmed the desktop/startup shortcuts and PATH entry actually landed, silently uninstalled and confirmed they're all gone, for real on a native `windows-latest` GitHub Actions runner (`windows-installer` job); never run interactively on this sandbox (no Windows/Wine here) — see below |
+| `linux-release.sh` + `nfpm.yaml` + `postinstall.sh` | `.deb` / Arch Linux package / tarball, with a post-install welcome message | **Yes** — built, installed via `dpkg -i` (watched the real welcome message print), and actually launched under Xvfb on this sandbox; see below |
 | `PKGBUILD` | Arch/AUR (from-source build) | No `makepkg`/Arch machine here, but builds the exact same `-tags guinative` binary the nfpm Arch package above does, which *was* run |
 | `macos-release.sh` | macOS `Runyx.app`+zip, `Runyx-<version>-Installer-arm64.pkg` | Not run in this sandbox (no macOS); the `.app` *and* the `.pkg` installer are both built and the `.pkg` is actually installed via `installer -pkg` for real in CI's `darwin-release` job, on a GitHub `macos-14` (Apple Silicon) runner — see below. No Intel/`amd64` leg right now: `macos-13` sat queued 24h with no runner ever available and was dropped rather than guessed at again |
 | `runyx.rb` | Homebrew (macOS/Linux) | No — no brew in this sandbox |
@@ -26,10 +26,20 @@ runyx.desktop`) and icon set (`assets/linux/icons/`, rasterized from
 the mascot SVG), then packages all of it with `nfpm` into a real
 `.deb`, a real Arch Linux `.pkg.tar.zst`, and a plain tarball.
 
+`postinstall.sh` runs automatically right after install (nfpm turns it
+into dpkg's `postinst` and pacman's `.INSTALL` post_install hook from
+one script) and prints a branded welcome message -- an ANSI-block
+rendering of the mascot in Runyx's navy/blue/cream, then exactly how
+to start Runyx (`runyx`, `runyx doctor`, `runyx serve`). It's the
+realistic ceiling for "custom UI" on a package format whose installer
+*is* the terminal the user just ran `dpkg -i`/`pacman -U` from.
+
 **Actually verified in this sandbox, not just built**: installed the
-built `.deb` with `dpkg -i` on this Debian-based system, confirmed
-`runyx version` runs from `/usr/bin/runyx`, confirmed the `.desktop`
-file and all 4 icon sizes landed under `/usr/share/`, then launched
+built `.deb` with `dpkg -i` on this Debian-based system and watched
+the welcome message print for real during `Setting up runyx (...)`,
+confirmed `runyx version` runs from `/usr/bin/runyx`, confirmed the
+`.desktop` file and all 4 icon sizes landed under `/usr/share/`, then
+launched
 `runyx` for real under `xvfb-run` (a virtual X display, since this
 sandbox has no real one) — the GTK/WebKit process started, stayed up
 (not a crash loop), and its embedded HTTP daemon answered real
@@ -63,20 +73,27 @@ generated from `assets/mascot/svg/runyx-mascot-idle-dark.svg` via
 produces a valid PE32+ GUI-subsystem binary with the icon resource
 present (checked with `wrestool -l`).
 
-`runyx.iss` (Inno Setup) is the real installer -- `Runyx-<version>-
-Installer.exe`, which a user double-clicks, clicks through a short
-wizard (Start Menu entry, optional desktop shortcut, no admin rights
-required since Runyx is portable-by-default), and ends with Runyx
-installed and optionally launched. **This is actually built and
-verified, just not in this sandbox**: `.github/workflows/ci.yml`'s
-`windows-installer` job runs on a native `windows-latest` GitHub
-Actions runner (not a cross-compile -- real Windows, mingw-w64 and
-Inno Setup installed via Chocolatey), builds `Runyx.exe` there
-directly, compiles `runyx.iss` with `ISCC.exe` into the real installer
-executable, then **silently installs it** (`/VERYSILENT`), confirms
-`Runyx.exe` landed where Inno Setup put it and actually runs
-(`Runyx.exe version`), **silently uninstalls it**, and confirms it's
-gone -- a full real install/uninstall round trip on genuine Windows,
+`runyx.iss` (Inno Setup) is the real, branded installer --
+`Runyx-<version>-Installer.exe`, with Runyx's own mascot artwork as
+the wizard banner (`installer-assets/WizardImage.bmp`/
+`WizardSmallImage.bmp`, see `installer-assets/README.md` for exactly
+how those were rendered) instead of Inno Setup's generic default, and
+three real configuration choices on top of the Start Menu entry: an
+optional desktop shortcut, **start Runyx at sign-in**, and **add
+Runyx to PATH** (so `runyx doctor`/`runyx pull`/etc. work from any
+terminal). No admin rights required, since Runyx is portable-by-default.
+**This is actually built and verified, just not in this sandbox**:
+`.github/workflows/ci.yml`'s `windows-installer` job runs on a native
+`windows-latest` GitHub Actions runner (not a cross-compile -- real
+Windows, mingw-w64 and Inno Setup installed via Chocolatey), builds
+`Runyx.exe` there directly, compiles `runyx.iss` with `ISCC.exe` into
+the real installer executable, then **silently installs it with every
+configuration task enabled**
+(`/TASKS=desktopicon,startupicon,addtopath`), confirms `Runyx.exe`
+runs from where Inno Setup put it *and* that the desktop shortcut, the
+startup shortcut, and the PATH entry all actually exist, **silently
+uninstalls it**, and confirms every one of those is gone too -- a full
+real install/configure/uninstall round trip on genuine Windows,
 automated, on every push. Not run interactively by a human anywhere
 yet -- see `docs/MANUAL_TESTS.md`'s Windows desktop app section for
 what still needs eyes on a real screen (the wizard UI itself, the
@@ -92,11 +109,18 @@ targeting Cocoa only works compiled natively on macOS), a real
 `.icns` generated the standard way (`sips` + `iconutil`) from
 `assets/mac/icon-1024.png` (the mascot SVG rasterized at 1024px), and
 an `Info.plist` with the bundle identifier/version/icon wired up. It
-then wraps that `.app` into **the real installer**: a `Runyx-<version>-
-Installer-<arch>.pkg`, built with `pkgbuild` (Xcode command line
-tools, no extra dependency), targeting `/Applications` -- a user
-double-clicks it, macOS's own Installer.app runs, and Runyx ends up
-installed, same shape as the Windows Inno Setup installer above.
+then wraps that `.app` into **the real, branded installer**: a
+`Runyx-<version>-Installer-<arch>.pkg`, built in two steps (both
+Xcode command line tools, no extra dependency) -- `pkgbuild` wraps
+`Runyx.app` into a plain component package, then `productbuild` wraps
+*that* into a distribution package pointed at a welcome page
+(`installer-assets-mac/welcome.html`) and a background image
+(`installer-assets-mac/background.png`, the same mascot-on-navy
+treatment as the Windows wizard banner), so Installer.app shows
+Runyx's own branding instead of a bare generic page -- targeting
+`/Applications`, a user double-clicks it, macOS's own Installer.app
+runs, and Runyx ends up installed, same shape as the Windows Inno
+Setup installer above.
 
 Not run in this sandbox at all -- there's no macOS here, and unlike
 Windows' mingw-w64 there is no practical way to cross-compile a cgo

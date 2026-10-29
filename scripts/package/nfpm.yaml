@@ -17,6 +17,15 @@ description: 100% local LLM runner -- fast, Ollama/OpenAI-compatible, with a bui
 vendor: Runyx
 homepage: https://github.com/furaxdev/runyx
 license: MIT
+# postinstall.sh is the closest thing to a "personalized setup screen"
+# a .deb/Arch package can have -- dpkg/pacman are command-line tools
+# with no GUI of their own, so a branded terminal welcome message
+# (run automatically once, right after install) is the realistic
+# ceiling here, as opposed to the Windows/macOS installers' actual
+# graphical wizard/welcome pages. nfpm translates this one script into
+# both dpkg's postinst and pacman's .INSTALL post_install hook.
+scripts:
+  postinstall: ./postinstall.sh
 contents:
   - src: ${NFPM_PKGROOT}/usr/bin/runyx
     dst: /usr/bin/runyx
