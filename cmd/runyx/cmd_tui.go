@@ -34,18 +34,6 @@ func findTUIBinary() string {
 	return ""
 }
 
-// isStdoutTTY reports whether stdout looks like an interactive
-// terminal rather than a pipe/file/redirect -- the TUI needs a real
-// terminal to draw into, and launching it into a pipe would just
-// produce garbled escape sequences in whatever's on the other end.
-func isStdoutTTY() bool {
-	info, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (info.Mode() & os.ModeCharDevice) != 0
-}
-
 // ExitCodeError carries a child process's exit code so main() can
 // propagate it with os.Exit without this package reaching for os.Exit
 // itself (which would make cmdTUI's non-zero-exit path untestable in
@@ -57,8 +45,8 @@ func (e ExitCodeError) Error() string { return fmt.Sprintf("exited with code %d"
 // cmdTUI execs the sibling runyx-tui binary, inheriting this
 // process's stdio. `runyx run <model>` is intentionally left alone
 // (its own plain chat loop, with the hang safety net) -- this is
-// reached only via the explicit `runyx tui` subcommand or bare `runyx`
-// with no arguments on a real terminal, per docs/DECISIONS.md.
+// reached only via the explicit `runyx tui` subcommand; a bare `runyx`
+// opens the app window instead (see cmdGUI), not the TUI.
 func cmdTUI(args []string) error {
 	binPath := findTUIBinary()
 	if binPath == "" {

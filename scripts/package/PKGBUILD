@@ -1,25 +1,49 @@
 # Maintainer: FuraxDev
-# AUR PKGBUILD for Runyx. Not published to the AUR yet. Untested in
-# this session (no Arch/makepkg available in this Debian-based
-# sandbox) — see docs/MANUAL_TESTS.md.
+# AUR PKGBUILD for Runyx, building the real native-window binary (the
+# same `-tags guinative` build scripts/package/linux-release.sh
+# produces via nfpm) plus its desktop entry and icon set. Not published
+# to the AUR yet, and makepkg itself was never run in this session (no
+# Arch machine here) -- but `-tags guinative` against real
+# libgtk-3-dev/libwebkit2gtk-4.1-dev was built and run end to end on a
+# Debian-based sandbox (installed, launched under Xvfb, confirmed the
+# daemon answers and the GTK/WebKit process stays up) -- see
+# docs/DECISIONS.md and docs/MANUAL_TESTS.md for exactly what that
+# covered and what still needs a real Arch system.
 pkgname=runyx
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="100% local LLM runner — fast, Ollama/OpenAI-compatible, with a built-in UI"
+pkgdesc="100% local LLM runner — fast, Ollama/OpenAI-compatible, with a native desktop app and web UI"
 arch=('x86_64' 'aarch64')
 url="https://github.com/furaxdev/runyx"
 license=('MIT')
-depends=()
-makedepends=('go')
+depends=('gtk3' 'webkit2gtk-4.1')
+makedepends=('go' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/furaxdev/runyx/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP') # filled in by release automation
 
 build() {
   cd "$pkgname-$pkgver"
-  CGO_ENABLED=0 go build -ldflags "-s -w" -o runyx ./cmd/runyx
+  export CGO_ENABLED=1
+  # webview_go's bundled cgo directives ask for webkit2gtk-4.0 by
+  # name; Arch's webkit2gtk-4.1 package (like Debian/Ubuntu's) only
+  # ships a webkit2gtk-4.1.pc, not a -4.0 one. Alias it rather than
+  # patching the vendored dependency -- see linux-release.sh, which
+  # does the same thing for the nfpm-built packages.
+  local shim="$srcdir/pkgconfig-shim"
+  mkdir -p "$shim"
+  sed 's/^Name: .*/Name: WebKit2GTK-4.0-compat-shim/' \
+    "$(pkg-config --variable=pcfiledir webkit2gtk-4.1)/webkit2gtk-4.1.pc" \
+    > "$shim/webkit2gtk-4.0.pc"
+  export PKG_CONFIG_PATH="$shim${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  go build -tags guinative -ldflags "-s -w -X github.com/furaxdev/runyx/internal/version.Version=$pkgver" -o runyx ./cmd/runyx
 }
 
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 runyx "$pkgdir/usr/bin/runyx"
+  install -Dm644 assets/linux/runyx.desktop "$pkgdir/usr/share/applications/runyx.desktop"
+  install -Dm644 assets/linux/icons/runyx-16.png "$pkgdir/usr/share/icons/hicolor/16x16/apps/runyx.png"
+  install -Dm644 assets/linux/icons/runyx-32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/runyx.png"
+  install -Dm644 assets/linux/icons/runyx-48.png "$pkgdir/usr/share/icons/hicolor/48x48/apps/runyx.png"
+  install -Dm644 assets/linux/icons/runyx-256.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/runyx.png"
 }

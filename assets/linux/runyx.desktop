@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Runyx
+Comment=100% local LLM runner -- no account, no telemetry
+Exec=runyx
+Icon=runyx
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass=Runyx

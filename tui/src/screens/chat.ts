@@ -15,12 +15,41 @@ import { TextBuffer, drawTextInput } from "../widgets/textinput.js";
 import { drawLine } from "../widgets/text.js";
 import { ZoneRegistry } from "../widgets/zones.js";
 import { clampScroll, scrollBy, scrollToEnd, visibleRange, type RowHeights } from "../layout/scroll.js";
+type VisibleRow = ReturnType<typeof visibleRange>[number];
 import { parseBlocks } from "../markdown/block.js";
 import { renderMarkdown, type RenderedLine } from "../markdown/render.js";
+import {
+  buildFlatIndex,
+  extractText,
+  lineRangeAt,
+  normalizeRange,
+  positionToOffset,
+  wordRangeAt,
+  type FlatLine,
+  type SelectionRange,
+} from "../selection/selection.js";
+import { copyToClipboard } from "../selection/clipboard.js";
 import type { RunyxClient } from "../api/client.js";
 import type { Conversation } from "../api/types.js";
+import type { MouseEvent as TuiMouseEvent } from "../term/input.js";
 
 const STALL_TIMEOUT_MS = 20000;
+const DOUBLE_CLICK_MS = 400;
+
+/**
+ * Clips a global selection range to one flat line's local [0, lineLen]
+ * span, or null if they don't overlap. Exported for unit testing --
+ * everything else in this module is entangled with a live
+ * Terminal/RunyxClient event loop, this is the one piece of the mouse
+ * selection logic that isn't.
+ */
+export function clampSelectionToLine(range: SelectionRange, f: FlatLine): { start: number; end: number } | null {
+  const lineLen = f.end - f.start;
+  const start = Math.max(0, range.start - f.start);
+  const end = Math.min(lineLen, range.end - f.start);
+  if (start >= end) return null;
+  return { start, end };
+}
 
 interface ChatTurn {
   role: "user" | "assistant";
@@ -56,6 +85,20 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
   let abortController: AbortController | null = null;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   let quit = false;
+
+  // Mouse-driven selection over the transcript (see src/selection/selection.ts):
+  // the flat offset index and visible-line mapping are rebuilt every draw()
+  // and cached here so the mouse handler -- which fires between frames --
+  // can translate a (row, col) click into a selection offset.
+  let lastFlat: FlatLine[] = [];
+  let lastInner: Rect = { row: 0, col: 0, width: 0, height: 0 };
+  let lastVisible: VisibleRow[] = [];
+  let selAnchor: number | null = null;
+  let selActive: SelectionRange | null = null;
+  let selecting = false;
+  let lastClickTime = 0;
+  let lastClickOffset = -1;
+  let clickCount = 0;
 
   function clearStallTimer() {
     if (stallTimer) clearTimeout(stallTimer);
@@ -106,11 +149,29 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
     scroll = clampScroll(scroll, rows, body!.height - 2);
     const inner = insetRect(body!, 1);
     const visible = visibleRange(scroll, rows, inner.height);
+    const flat = buildFlatIndex(lines);
     for (const v of visible) {
       const line = lines[v.index]!;
-      drawLine(screen, inner, inner.row + v.screenRow, line.plainText, { fg: theme.text });
+      const row = inner.row + v.screenRow;
+      const f = flat[v.index];
+      const sel = selActive && f ? clampSelectionToLine(selActive, f) : null;
+      if (!sel) {
+        drawLine(screen, inner, row, line.plainText, { fg: theme.text });
+        continue;
+      }
+      const chars = Array.from(line.plainText);
+      const before = chars.slice(0, sel.start).join("");
+      const mid = chars.slice(sel.start, sel.end).join("");
+      const after = chars.slice(sel.end).join("");
+      let col = inner.col;
+      if (before) col = screen.writeText(row, col, before, { fg: theme.text });
+      if (mid) col = screen.writeText(row, col, mid, { fg: theme.accentContrast, bg: theme.accent });
+      if (after) screen.writeText(row, col, after, { fg: theme.text });
     }
     drawBox(screen, body!, { borderFg: theme.border });
+    lastFlat = flat;
+    lastInner = inner;
+    lastVisible = visible;
 
     const footerInner = drawBox(screen, footer!, { borderFg: streaming ? theme.warning : theme.border });
     drawTextInput(screen, footerInner, input, streaming ? "(waiting for reply...)" : "Type a message, Enter to send...", {
@@ -178,17 +239,40 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
     }
   }
 
+  /** Maps a terminal-absolute (row, col) to a flat selection offset, or null if it's outside the transcript. */
+  function screenPosToOffset(row: number, col: number): number | null {
+    const localRow = row - lastInner.row;
+    if (localRow < 0 || !lastFlat.length) return null;
+    const v = lastVisible.find((x) => x.screenRow === localRow);
+    if (!v) return null;
+    const col0 = Math.max(0, col - lastInner.col);
+    return positionToOffset(lastFlat, v.index, col0);
+  }
+
+  function clearSelection(): void {
+    selAnchor = null;
+    selActive = null;
+    selecting = false;
+  }
+
   return new Promise<void>((resolve) => {
     const onKey = (e: { key: string; ctrl: boolean }) => {
       if (quit) return;
       if (e.ctrl && (e.key === "c" || e.key === "q")) {
         quit = true;
         terminal.off("key", onKey);
+        terminal.off("mouse", onMouse);
+        terminal.off("resize", onResize);
         resolve();
         return;
       }
       if (e.ctrl && e.key === "x") {
         stop();
+        return;
+      }
+      if (e.key === "Escape" && selActive && selActive.start !== selActive.end) {
+        clearSelection();
+        terminal.requestRender();
         return;
       }
       if (e.key === "Enter" && !streaming) {
@@ -205,7 +289,70 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
       else if (e.key.length === 1 && !e.ctrl) input.insert(e.key);
       terminal.requestRender();
     };
+
+    const onMouse = (e: TuiMouseEvent) => {
+      if (quit) return;
+      if (e.action === "wheel") {
+        scroll = scrollBy(scroll, { count: 10000, heightOf: () => 1 }, 1, e.button === "wheelUp" ? -3 : 3);
+        terminal.requestRender();
+        return;
+      }
+      if (e.button !== "left") return;
+
+      if (e.action === "down") {
+        const offset = screenPosToOffset(e.row, e.col);
+        if (offset === null) {
+          clearSelection();
+          terminal.requestRender();
+          return;
+        }
+        const now = Date.now();
+        clickCount = now - lastClickTime < DOUBLE_CLICK_MS && offset === lastClickOffset ? clickCount + 1 : 1;
+        lastClickTime = now;
+        lastClickOffset = offset;
+
+        if (clickCount >= 3) {
+          selActive = lineRangeAt(lastFlat, offset);
+          selAnchor = null;
+          selecting = false;
+        } else if (clickCount === 2) {
+          selActive = wordRangeAt(lastFlat, offset);
+          selAnchor = null;
+          selecting = false;
+        } else {
+          selAnchor = offset;
+          selActive = { start: offset, end: offset };
+          selecting = true;
+        }
+        terminal.requestRender();
+        return;
+      }
+
+      if (e.action === "move" && selecting && selAnchor !== null) {
+        const offset = screenPosToOffset(e.row, e.col);
+        if (offset !== null) {
+          selActive = normalizeRange(selAnchor, offset);
+          terminal.requestRender();
+        }
+        return;
+      }
+
+      if (e.action === "up") {
+        selecting = false;
+        if (selActive && selActive.start !== selActive.end) {
+          void copyToClipboard(extractText(lastFlat, selActive));
+        }
+      }
+    };
+
+    const onResize = () => {
+      clearSelection();
+      terminal.requestRender();
+    };
+
     terminal.on("key", onKey);
+    terminal.on("mouse", onMouse);
+    terminal.on("resize", onResize);
     terminal.requestRender();
   });
 }

@@ -8,17 +8,19 @@ import (
 )
 
 func main() {
+	// Reattaches stdio to a launching terminal's console on Windows, a
+	// no-op everywhere else. Must run before anything touches
+	// stdout/stderr -- see console_windows.go for why.
+	attachParentConsole()
+
 	if len(os.Args) < 2 {
-		// Bare `runyx` on a real terminal launches the TUI, the same way
-		// `git` with no args prints help but an interactive shell tool
-		// would rather hand you something to look at. Piped/redirected
-		// stdout (scripts, CI) keeps the old behavior: usage + exit 1.
-		if isStdoutTTY() {
-			exitOnError(cmdTUI(nil))
-			return
-		}
-		printUsage()
-		os.Exit(1)
+		// Bare `runyx` (double-clicked, or run with no arguments from a
+		// terminal) opens the app window -- the whole point of this
+		// being "a real Windows application, not a site in a browser"
+		// is that this is what happens with zero flags to remember.
+		// `runyx tui` is still how to get the terminal UI explicitly.
+		exitOnError(cmdGUI(nil))
+		return
 	}
 
 	cmd := os.Args[1]
@@ -30,6 +32,8 @@ func main() {
 		err = cmdVersion(args)
 	case "serve":
 		err = cmdServe(args)
+	case "gui":
+		err = cmdGUI(args)
 	case "tui":
 		err = cmdTUI(args)
 	case "doctor":
@@ -85,9 +89,10 @@ func printUsage() {
 
 Usage:
   runyx version              Print version info
-  runyx                      Launch the TUI (if on a real terminal; same as 'runyx tui')
-  runyx tui                  Launch the terminal UI
-  runyx serve                Run the daemon in the foreground
+  runyx                      Open the app window (same as 'runyx gui')
+  runyx gui                  Open the app window, starting the daemon if needed
+  runyx tui                  Launch the terminal UI (needs runyx-tui alongside this binary)
+  runyx serve                Run the daemon in the foreground, no window
   runyx doctor                Detect CPU/RAM/GPU and backend availability
   runyx recommend              Suggest models that fit this machine
   runyx tune <model>           Compute and cache tuning params for a model

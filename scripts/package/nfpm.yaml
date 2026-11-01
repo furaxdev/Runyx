@@ -1,23 +1,49 @@
-# nfpm config for .deb/.rpm packages: https://nfpm.goreleaser.com
-# Usage (once a release binary exists at dist/runyx):
-#   nfpm package --config scripts/package/nfpm.yaml --packager deb
-#   nfpm package --config scripts/package/nfpm.yaml --packager rpm
-#
-# Not run in this session (nfpm isn't installed in this sandbox) — see
-# docs/MANUAL_TESTS.md.
+# nfpm config for .deb/Arch Linux/.rpm packages: https://nfpm.goreleaser.com
+# Usage: see scripts/package/linux-release.sh, which builds the
+# native-window binary, assembles the pkgroot this references, and
+# calls `nfpm package` for both --packager deb and --packager archlinux.
+# `expand: true` on each content entry is required for nfpm to actually
+# substitute the ${NFPM_...} environment variables below -- without it,
+# nfpm packages the literal string "${NFPM_PKGROOT}/..." as a path and
+# fails with "no matching files".
 name: runyx
 arch: amd64
 platform: linux
-version: 0.1.0
+version: ${NFPM_VERSION}
 section: utils
 priority: optional
 maintainer: FuraxDev
-description: 100% local LLM runner — fast, Ollama/OpenAI-compatible, with a built-in UI
+description: 100% local LLM runner -- fast, Ollama/OpenAI-compatible, with a built-in desktop app and web UI
 vendor: Runyx
 homepage: https://github.com/furaxdev/runyx
 license: MIT
+# postinstall.sh is the closest thing to a "personalized setup screen"
+# a .deb/Arch package can have -- dpkg/pacman are command-line tools
+# with no GUI of their own, so a branded terminal welcome message
+# (run automatically once, right after install) is the realistic
+# ceiling here, as opposed to the Windows/macOS installers' actual
+# graphical wizard/welcome pages. nfpm translates this one script into
+# both dpkg's postinst and pacman's .INSTALL post_install hook.
+scripts:
+  postinstall: ./postinstall.sh
 contents:
-  - src: ../../dist/runyx
+  - src: ${NFPM_PKGROOT}/usr/bin/runyx
     dst: /usr/bin/runyx
+    expand: true
     file_info:
       mode: 0755
+  - src: ${NFPM_PKGROOT}/usr/share/applications/runyx.desktop
+    dst: /usr/share/applications/runyx.desktop
+    expand: true
+  - src: ${NFPM_PKGROOT}/usr/share/icons/hicolor/16x16/apps/runyx.png
+    dst: /usr/share/icons/hicolor/16x16/apps/runyx.png
+    expand: true
+  - src: ${NFPM_PKGROOT}/usr/share/icons/hicolor/32x32/apps/runyx.png
+    dst: /usr/share/icons/hicolor/32x32/apps/runyx.png
+    expand: true
+  - src: ${NFPM_PKGROOT}/usr/share/icons/hicolor/48x48/apps/runyx.png
+    dst: /usr/share/icons/hicolor/48x48/apps/runyx.png
+    expand: true
+  - src: ${NFPM_PKGROOT}/usr/share/icons/hicolor/256x256/apps/runyx.png
+    dst: /usr/share/icons/hicolor/256x256/apps/runyx.png
+    expand: true

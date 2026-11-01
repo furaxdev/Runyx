@@ -639,3 +639,391 @@ for free once built, nothing extra needed there).
     `internal/agent/policy_test.go` and the new cases in
     `internal/agent/agent_test.go`, `internal/backend/fetch_test.go`,
     and `internal/convert/convert_test.go`.
+
+## 2026-10-25 — Runyx as a real Windows app: native window, not a browser tab
+
+Reported as a bug (v0.1.0, Windows): `runyx.exe` with no arguments
+tried to exec a sibling `runyx-tui.exe` that the release zip never
+included; `runyx.exe serve` only started the headless daemon and left
+the user to open a browser themselves. Neither is "a real Windows
+application" -- fixed by making a bare `runyx` (double-clicked or run
+with no arguments, on every OS, not just Windows) open an app-style
+window instead of the TUI, with `runyx tui` still available explicitly
+and `runyx serve` unchanged for the headless/server case.
+
+- **`internal/guiwindow`**: shows the daemon's URL in a window via
+  three tiers, each a worse experience than the one before it but
+  needing nothing the user has to install: (1) a true embedded native
+  webview (WebView2 on Windows via `github.com/webview/webview_go`,
+  WebKitGTK/Cocoa on Linux/macOS), (2) an installed browser's
+  `--app=url` mode (no tabs, no address bar, but a real browser
+  process), (3) the OS default browser. Tier selection is build-tag
+  driven, not a runtime feature flag:
+  - `native_cgo_windows.go` (`cgo && windows`): always compiled into
+    the Windows build (cgo is mandatory there specifically for this).
+    Before ever calling into the C++ webview library, checks the
+    WebView2 Evergreen Runtime's own registry marker
+    (`...\EdgeUpdate\Clients\{F3017226-...}`'s `pv` value, the same
+    check Microsoft's own guidance uses) and falls through to tier 2 if
+    it's absent, rather than risking a crash deep in WebView2's native
+    init code that Go's `recover()` cannot catch if it aborts the
+    process instead of raising a catchable exception.
+  - `native_other_guinative.go` (`cgo && !windows && guinative`): the
+    Linux/macOS equivalent, gated behind an explicit `-tags guinative`
+    opt-in on top of cgo, not "compiles whenever cgo happens to be
+    on". That distinction matters because `go test -race ./...`
+    enables cgo for the race detector on every platform, including
+    this project's own `ubuntu-latest` CI runner, which doesn't have
+    `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` installed -- without the
+    opt-in tag, this package must not make that otherwise-unrelated
+    `-race` run suddenly require them.
+  - `native_other_stub.go` (`cgo && !windows && !guinative`) and
+    `native_stub.go` (`!cgo`): both just return `ErrNoNativeWindow`,
+    letting `Open` fall through to tiers 2/3. Verified in this sandbox:
+    installed `libgtk-3-dev` + `libwebkit2gtk-4.1-dev` (Ubuntu 24.04
+    only ships the `4.1`-suffixed package; webview_go's bundled cgo
+    directives ask for `webkit2gtk-4.0` by name, so a local
+    `webkit2gtk-4.0.pc` pkg-config alias was needed to prove
+    `-tags guinative` actually compiles against real GTK/WebKit2GTK --
+    not committed to the repo, since it's a dev-environment-only
+    naming workaround, not something Runyx ships) and confirmed
+    `go build ./internal/guiwindow/...` succeeds; confirmed
+    `CGO_ENABLED=1 go build ./...` with *no* guinative tag and *no*
+    pkg-config shim also succeeds (the actual CI configuration), and
+    that `go test -race ./...` passes end to end.
+- **Windows cross-compile from Linux**: installed
+  `gcc-mingw-w64-x86-64`/`g++-mingw-w64-x86-64` and proved a full
+  `GOOS=windows GOARCH=amd64 CGO_ENABLED=1` build of `./cmd/runyx`
+  succeeds, producing a real PE32+ binary. One real obstacle:
+  webview_go's bundled `WebView2.h` `#include`s `"EventToken.h"`
+  (capital letters), but mingw-w64's own bundled Windows SDK headers
+  spell the file `eventtoken.h` -- a hard failure on this
+  case-sensitive filesystem. Fixed with a one-line shim header
+  (`EventToken.h` that just `#include`s `eventtoken.h`) added first on
+  the include path via `CGO_CFLAGS`/`CGO_CXXFLAGS`; see
+  `scripts/package/windows-release.sh`, which does this and is what
+  `.github/workflows/ci.yml`'s new `windows-release` job calls.
+  windows/arm64 is not attempted: Ubuntu's mingw-w64 packages only
+  cross-compile to x86_64, not aarch64.
+- **No console flash on double-click, but CLI output still works from
+  a terminal**: built with `-ldflags -H=windowsgui` (no console
+  subsystem), which also means a GUI-subsystem process starts with
+  *no* stdio handles at all -- not just a hidden console, none --
+  which would otherwise make `runyx.exe doctor`/`serve`/etc. silently
+  produce no visible output when run from an existing PowerShell/cmd
+  window. `cmd/runyx/console_windows.go` calls `AttachConsole
+  (ATTACH_PARENT_PROCESS)` as the very first thing `main()` does and
+  reopens `os.Stdout`/`os.Stderr`/`os.Stdin` against `CONOUT$`/`CONIN$`
+  when it succeeds; when there's no parent console (the double-click
+  case), `AttachConsole` just fails and this is a no-op, which is
+  exactly the point. `console_other.go` is the (empty) non-Windows
+  stub -- this is a Windows-subsystem-specific problem, nothing else
+  needs it.
+- **Single instance + daemon reuse** (`cmd/runyx/cmd_gui.go`):
+  `acquireSingleInstance` wins outright via an atomically-created lock
+  file (`O_CREATE|O_EXCL` is race-free across processes at the OS
+  level, so no platform-specific PID-liveness syscalls are needed); if
+  the lock file already exists, it checks whether a daemon actually
+  answers at the configured address before deciding what that means --
+  reachable means a real instance (this GUI or even a plain
+  `runyx serve`) is genuinely running, so this process backs off;
+  unreachable means the lock is stale (left behind by a crash, not a
+  clean shutdown that would have removed it), so it's cleaned up and
+  retried once. `ensureDaemonRunning` reuses an already-reachable
+  daemon instead of starting a second one, and only the window that
+  actually started its own daemon stops it when the window closes.
+- **Taskbar icon**: `assets/mascot/svg/runyx-mascot-idle-dark.svg`
+  rasterized at 16/32/48/256px (`rsvg-convert` via ImageMagick's
+  `convert`, after installing `librsvg2-bin` -- plain ImageMagick alone
+  has no SVG rasterizer of its own) and combined into
+  `cmd/runyx/runyx.ico` (checked with `wrestool -l` after building:
+  all 4 sizes present as `RT_ICON` plus one `RT_GROUP_ICON`), embedded
+  via `cmd/runyx/icon_windows.rc` + `x86_64-w64-mingw32-windres` ->
+  `cmd/runyx/icon_windows.syso`, which Go links in automatically for
+  windows builds by filename convention (`name_windows.syso`) with no
+  extra build flag needed, and which a plain Linux/macOS build simply
+  never sees.
+- **Offline by default**: `internal/webui/dist` (the built web UI) was
+  grepped for external `http(s)://` references -- the only hit is an
+  XML namespace URI string (`http://www.w3.org/2000/svg`) inside an
+  SVG, not a network fetch. No new network call was introduced by any
+  of the above; `cmdGUI`'s daemon-start path reuses `cmdServe`'s
+  existing backend-resolution logic unchanged (already tolerant of no
+  network -- see `resolveBackendBinary`'s doc comment from M1).
+  Verifying this holds on a real offline Windows machine, after a
+  model has actually been downloaded, needs a human with that machine
+  -- see `docs/MANUAL_TESTS.md`'s new "Windows desktop app" section,
+  item 24 specifically, which is the full airplane-mode flight test.
+- **Installer**: `scripts/package/runyx.iss` is a real Inno Setup
+  script (Start Menu entry, optional desktop shortcut, no admin rights
+  required since Runyx is portable-by-default) but was never compiled
+  -- no Windows, no Wine, no `iscc` in this sandbox. See
+  `scripts/package/README.md`.
+- **Not done here**: actually running any of this on Windows. Every
+  claim above that says "proved"/"confirmed" is about what compiles
+  and what the unit tests cover; the interactive, real-WebView2,
+  real-offline experience needs a human on real Windows hardware --
+  `docs/MANUAL_TESTS.md` items 18-25 are exactly that checklist, in
+  the order a reviewer should work through them.
+
+## 2026-10-25 — Same treatment for Linux (Debian/Arch) and macOS
+
+Follow-up to the Windows desktop app work above: "do the same for
+every other system." `internal/guiwindow`'s three-tier window
+strategy and `cmd/runyx/cmd_gui.go`'s single-instance/daemon-reuse
+logic were already fully cross-platform (no OS-specific code there at
+all) -- what Linux and macOS were missing was the *native build being
+the one that actually ships*, a real package/bundle, an icon
+integrated into the desktop environment, and CI that proves it,
+exactly like `windows-release` proves the Windows side.
+
+- **Linux is the one verified beyond "it compiles" in this session,
+  not just scripted**: `scripts/package/linux-release.sh` builds
+  `runyx` with `-tags guinative` (the native WebKitGTK window, gated
+  behind that explicit tag precisely so `go test -race ./...` keeps
+  passing without GTK/WebKit dev packages installed -- see the
+  Windows entry above for why that tag exists), assembles a
+  `.desktop` entry (`assets/linux/runyx.desktop`) and a 16/32/48/256px
+  icon set (`assets/linux/icons/`, rasterized from the same mascot SVG
+  the Windows `.ico` came from), and packages all of it with `nfpm`
+  (`go install`ed fresh in this sandbox) into a real `.deb`, a real
+  Arch Linux `.pkg.tar.zst`, and a plain tarball.
+  - **Actually installed and run, not just built**: `dpkg -i`'d the
+    built `.deb` on this Debian-based sandbox, confirmed `runyx
+    version` ran from `/usr/bin/runyx` and the desktop file/icons
+    landed under `/usr/share/`, then ran `runyx` for real under
+    `xvfb-run` (a virtual X display -- this sandbox has no real one).
+    The GTK/WebKit process started and stayed up (not a crash loop),
+    printed the expected `libEGL`/DRI3 warnings for a GPU-less sandbox
+    (harmless -- WebKit falls back to software rendering) and nothing
+    worse, and its embedded daemon answered a real
+    `GET /api/tags` -> 200 on `127.0.0.1:11535`. Launched a second
+    `runyx` while the first was still running and confirmed it printed
+    "Runyx is already running" and exited instead of opening a
+    duplicate -- the single-instance logic working against a real
+    concurrent process, not just the unit tests' synthetic lock-file
+    scenarios. `dpkg -r`'d it afterward to leave the sandbox clean.
+    `.github/workflows/ci.yml`'s new `linux-release` job repeats the
+    build-install-smoke-test-uninstall sequence on every push, on a
+    fresh `ubuntu-latest` runner.
+  - Same `EventToken.h`-style naming problem as Windows, different
+    header: current Ubuntu/Debian/Arch all ship `webkit2gtk-4.1`, not
+    the `webkit2gtk-4.0` name `webview_go`'s bundled cgo directives
+    ask for by exact string. Worked around the same way -- a one-line
+    pkg-config alias generated at build time (`sed` on the real
+    `.pc` file), not a patch to the vendored dependency.
+  - `nfpm.yaml` needed `expand: true` on every `contents[]` entry for
+    its `${NFPM_PKGROOT}`/`${NFPM_VERSION}` env-var references to
+    actually substitute -- found by nfpm failing with a literal
+    "`Glob failed: ${NFPM_PKGROOT}/usr/bin/runyx: no matching files`"
+    until that was added; without it, nfpm silently treats `${...}` as
+    a literal path component.
+  - The Arch package was inspected (`.PKGINFO`, file layout, both
+    correct) but not installed -- no `pacman` on this Debian-based
+    sandbox. `scripts/package/PKGBUILD` (a from-source AUR build, as
+    opposed to nfpm's prebuilt binary package) was updated to match --
+    same `-tags guinative` build, same pkg-config shim, installs the
+    same desktop file/icons -- but `makepkg` itself was never run.
+- **macOS: real CI on real Apple hardware, nothing locally.** A cgo
+  build targeting Cocoa/WebKit cannot be cross-compiled from Linux the
+  way Windows' mingw-w64 handled cgo-targeting-Windows -- there is no
+  equivalent lightweight cross toolchain, and standing up osxcross
+  (unofficial, needs an extracted Apple SDK, licensing-gray, fragile)
+  was not attempted as disproportionate to what it would buy here.
+  Instead, `.github/workflows/ci.yml` gained a `darwin-release` job
+  that runs `scripts/package/macos-release.sh` directly on two of
+  GitHub's own macOS runners (`macos-13`, Intel; `macos-14`, Apple
+  Silicon) -- genuine macOS building the genuine Cocoa/WebKit backend
+  natively, no cross-compilation involved at all, which is actually
+  *stronger* verification than this sandbox could ever produce itself
+  even with a hypothetical working osxcross setup. The script produces
+  a real `Runyx.app` bundle: `Contents/MacOS/Runyx` (the binary, built
+  with `-tags guinative` same as Linux), a real `Runyx.icns` generated
+  the standard way (`sips` to resize `assets/mac/icon-1024.png` into
+  an `.iconset`, `iconutil -c icns`), and an `Info.plist` with the
+  bundle id/version/icon wired up. Not run here at all -- this is
+  100% unverified by this sandbox, verified only by the CI job itself
+  running on GitHub's infrastructure.
+- **Icon sources**: `assets/linux/icons/*.png` and
+  `assets/mac/icon-1024.png` are both rasterized (via `rsvg-convert`,
+  already installed for the Windows `.ico` earlier) from the exact
+  same `runyx-mascot-idle-dark.svg` the Windows icon came from, so all
+  three platforms show the same mascot, not three different ad hoc
+  renders.
+- **Not done here**: Homebrew (`runyx.rb`), `.rpm` (same `nfpm.yaml`
+  as the verified `.deb`/Arch targets, likely to work, not tried),
+  AppImage, Docker, winget -- unchanged from before this entry, still
+  tracked honestly in `scripts/package/README.md`'s status table.
+  `docs/MANUAL_TESTS.md` items 26-33 are the human checklist for
+  everything this sandbox genuinely could not verify (real window
+  rendering outside Xvfb, Arch `pacman -U`, every macOS item, the
+  per-OS offline flight-tests).
+
+## 2026-10-25 — Real installers for Windows and macOS (not just zips)
+
+Follow-up: "make a Runyx(version)Installer.exe that installs and sets
+up Runyx, same for macOS." Both platforms already had a real app
+(`Runyx.exe`, `Runyx.app`); what was missing was the actual
+double-click-and-it's-installed experience, built and genuinely
+verified rather than just a script nobody had run.
+
+- **Windows (`scripts/package/runyx.iss`, Inno Setup)**: rather than
+  trying to get Inno Setup's compiler running under Wine on this
+  Linux sandbox (fragile, and the mingw-w64 cross-compile path already
+  proved `Runyx.exe` itself builds correctly), `.github/workflows/
+  ci.yml` gained a `windows-installer` job on `runs-on: windows-latest`
+  -- a genuine, native Windows machine via GitHub's own runners, the
+  same reasoning as `darwin-release`'s macOS runners. It installs
+  mingw-w64 and Inno Setup via Chocolatey, builds `Runyx.exe` natively
+  (hitting the exact same `EventToken.h` lowercase-vs-uppercase
+  mismatch the Linux cross-compile does, since Chocolatey's `mingw`
+  package bundles the same upstream mingw-w64 SDK headers -- same
+  shim), compiles `runyx.iss` with `ISCC.exe` into
+  `Runyx-<version>-Installer.exe`, and then **actually installs it**:
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, confirms `Runyx.exe`
+  landed at `%LOCALAPPDATA%\Programs\Runyx\Runyx.exe` and that
+  `Runyx.exe version` runs, then silently uninstalls it and confirms
+  it's gone. A real install/uninstall round trip on genuine Windows,
+  automated, every push -- not just "it compiled." `runyx.iss` itself
+  gained `/DMyAppVersion=`/`/DSourceExe=` overrides (so CI can pass the
+  commit-based CI version and point at wherever it built the exe) and
+  an `OutputBaseFilename` that actually includes the version
+  (`Runyx-{#MyAppVersion}-Installer`), matching what was asked for
+  literally.
+- **macOS (`scripts/package/macos-release.sh`, now also builds a
+  `.pkg`)**: added a `pkgbuild --component Runyx.app --install-location
+  /Applications ...` step after the existing `.app` build -- `pkgbuild`
+  ships with Xcode command line tools, already present on the
+  `darwin-release` job's runners, no new dependency. Produces
+  `Runyx-<version>-Installer-<arch>.pkg`, the macOS equivalent of a
+  Windows installer: double-click, click through Installer.app's
+  wizard, Runyx is in `/Applications`. `darwin-release`'s CI job now
+  **actually installs it** too: `sudo installer -pkg ... -target /`,
+  confirms `/Applications/Runyx.app` exists and `Runyx version` runs
+  from inside it, then removes it -- the same real-install-round-trip
+  rigor as Windows, on genuine macOS hardware/VMs (`macos-13` Intel,
+  `macos-14` Apple Silicon).
+- **Version string sanitization, both platforms**: CI builds pass a
+  free-form `ci-<sha>` version (so `runyx version` shows the exact
+  commit), but a Windows/macOS installer's own version metadata
+  doesn't accept that format as cleanly as a `.deb`'s does (Debian's
+  hard rejection of a non-digit-led version is what originally
+  surfaced this exact class of bug for Linux, fixed in the entry right
+  above this one) -- `macos-release.sh` picked up the same
+  digit-prefixed `PKG_VERSION` fallback pattern (`0.0.0` for a non-
+  numeric input) `linux-release.sh` already uses, and the
+  `windows-installer` CI job passes a clean `0.0.0-ci` as
+  `MyAppVersion` for the same reason, independent of the full
+  `ci-<sha>` string baked into the binary via `-ldflags`.
+- **Not done here**: nothing about this was run by a human on a real
+  screen -- the CI jobs prove the install mechanics work (files land
+  where they should, the binary runs, uninstall is clean), not that
+  the installer wizard *looks* right or that Start Menu/Dock entries
+  actually open the app when clicked. `docs/MANUAL_TESTS.md` items 25
+  and 31-32 are exactly that remaining by-eye checklist.
+
+## 2026-10-26 — `darwin-release`'s Intel (macos-13) leg dropped: a real CI capacity problem, not a code bug
+
+The PR's CI run showed every job green except `darwin-release
+(macos-13, amd64)`, which sat `queued` for a full 24 hours with no
+runner ever picked up, then GitHub cancelled it and the whole
+workflow run along with it (a queued job that long is past GitHub's
+own timeout, not this job doing anything wrong). That's a runner-pool
+availability problem on this account/repo for the `macos-13` label,
+not a flake to retry past and not something the workflow or the
+packaging script caused -- `darwin-release (macos-14, arm64)` on the
+very same run, same commit, started within seconds and passed
+end to end (build, `.pkg`, real `installer -pkg` install, smoke test).
+
+Rather than guess at another Intel-capable runner label without being
+able to confirm it's actually available on this account (another
+24-hour stall would cost a full day to find out), `darwin-release`'s
+matrix was removed and the job now just runs on `macos-14` (Apple
+Silicon) directly, no `amd64` leg. This means:
+
+- `runyx-darwin-arm64.zip` and the `Runyx-<version>-Installer-arm64.pkg`
+  installer are still built and installed-and-verified for real on
+  every push, exactly as before.
+- **No `darwin-amd64`/Intel `Runyx.app` or installer is built by CI
+  right now.** `scripts/package/macos-release.sh` itself is
+  architecture-agnostic (it just builds for `go env GOARCH`, whatever
+  that is on the machine running it) -- an Intel Mac, or a CI runner
+  on a label this account's plan actually has capacity for, can still
+  produce one by running the script directly. Re-adding an automated
+  Intel leg needs someone who can check (or has access to adjust) this
+  account's actual GitHub Actions runner availability, which this
+  session cannot do from here.
+- `cross-compile (darwin, amd64)` (the plain `CGO_ENABLED=0`
+  static-binary job, no window) is unaffected -- that one already runs
+  fine on `ubuntu-latest`, since it doesn't need cgo/Cocoa at all.
+
+## 2026-10-26 — Branded, configuring installers on every OS, not just plumbing
+
+Follow-up to the three plain installers above: "a setup with custom UI
+that installs Runyx, configures it." All three already worked
+mechanically (CI proved real install/uninstall round trips); what was
+missing was Runyx's own branding on the wizard itself, and actual
+configuration choices beyond "copy the file."
+
+- **Windows (`runyx.iss`)**: `WizardImageFile`/`WizardSmallImageFile`
+  now point at `installer-assets/WizardImage.bmp` (164x314) and
+  `WizardSmallImage.bmp` (55x58) -- the same mascot the taskbar icon
+  uses, rendered onto Runyx's own navy (`#1B2233`) with `rsvg-convert`
+  + ImageMagick (`-filter point` on the resizes so the pixel art stays
+  crisp instead of blurring), plus a custom `[Messages]` welcome
+  page text, instead of Inno Setup's generic default banner/text. Three
+  real configuration tasks were added, not just the pre-existing
+  desktop-icon checkbox: **start Runyx at sign-in** (adds a shortcut to
+  `{userstartup}`) and **add Runyx to PATH** (a `[Code]` Pascal
+  section that read-modify-writes `HKCU\Environment\Path`, the
+  standard Inno Setup idiom for a per-user PATH entry, with matching
+  cleanup in `CurUninstallStepChanged`). `.github/workflows/ci.yml`'s
+  `windows-installer` job now silently installs with
+  `/TASKS=desktopicon,startupicon,addtopath` and actually checks all
+  three configuration effects landed (the desktop/startup `.lnk`
+  files exist, `HKCU`'s `Path` contains the install dir) *and* that
+  uninstall cleanly reverses every one of them -- not just that
+  `Runyx.exe` got copied.
+- **macOS (`macos-release.sh`)**: upgraded from a bare `pkgbuild`
+  component package to a `productbuild` distribution package --
+  `pkgbuild` still builds the underlying component, but it's now
+  wrapped with a `distribution.xml` that points
+  `installer-gui-script` at a branded welcome page
+  (`installer-assets-mac/welcome.html`) and background image
+  (`installer-assets-mac/background.png`, the same mascot-on-navy
+  treatment as the Windows wizard image, generated the same way),
+  so Installer.app shows Runyx's own branding instead of a bare
+  generic page. `darwin-release`'s existing `installer -pkg ...
+  -target /` smoke test exercises this unchanged, since the resulting
+  `.pkg` installs identically either way -- this is purely the
+  installer's visual presentation, not a change to what it does.
+- **Linux (`.deb`/Arch, `postinstall.sh`)**: dpkg/pacman are
+  command-line tools with no GUI of their own, so there's no
+  equivalent of a graphical wizard to brand here -- the realistic
+  ceiling is a message printed right after install. `nfpm.yaml` gained
+  a `scripts.postinstall` pointing at a new `postinstall.sh`, which
+  nfpm turns into both dpkg's `postinst` and pacman's `.INSTALL`
+  post_install hook from one script: a small ANSI-block-character
+  rendering of the mascot (no image-in-terminal protocol is
+  universal, but ANSI 256-color is) in the same navy/blue/cream
+  palette, followed by exactly how to actually start Runyx
+  (`runyx`, `runyx doctor`, `runyx serve`). **Actually run, not just
+  written**: installed the rebuilt `.deb` with `dpkg -i` on this
+  sandbox and watched the welcome message print for real during
+  `Setting up runyx (...)`.  Found and fixed a real bug doing this:
+  nfpm resolves a relative `scripts.postinstall` path against the
+  *current working directory*, not `nfpm.yaml`'s own directory, so
+  `./postinstall.sh` only worked once `linux-release.sh` was changed
+  to `cd` into `scripts/package/` before invoking `nfpm package` (it
+  previously ran from the repo root). `.github/workflows/ci.yml`'s
+  `linux-release` job now also greps the real `dpkg -i` output for
+  "Runyx is installed" so a future regression here fails loudly
+  instead of silently losing the welcome message. The same
+  `postinstall.sh` is copied into the plain tarball's `install.sh`
+  too, for anyone installing that instead of a real package.
+- **Not done**: a GUI wrapper for the Linux install path (a `.run`
+  self-extracting script with a `zenity`/Qt first-run dialog) was
+  considered and skipped as disproportionate effort for a "nice to
+  have" beyond what dpkg/pacman already give every Linux user by
+  convention (a terminal they just used to install it in the first
+  place).
