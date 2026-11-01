@@ -60,14 +60,28 @@ only what is true right now.
   the QR code's raw module grid as unicode half-blocks -- no QR
   encoding was reimplemented in TypeScript; `internal/pairing`'s
   existing, tested Go encoder is still the only one.
+- **Mouse + text selection in the Chat transcript (T3 part 4)**: T2's
+  content-anchored selection engine is now actually wired to the Chat
+  screen's transcript, not just unit-tested in isolation. Click-drag
+  selects (highlighted inline, same accent used by the Ctrl+K
+  palette), double-click selects a word, triple-click selects a line,
+  Escape clears a selection, and releasing the mouse over a non-empty
+  selection copies it (OSC 52 + CLI fallback, same `copyToClipboard`
+  T2 already had). Mouse wheel now also scrolls the transcript. The
+  offset math reuses the flat index built fresh each frame (per
+  `src/selection/selection.ts`'s own design note: safe because new
+  tokens only ever append/extend, never rewrite earlier offsets), and
+  a terminal resize clears any active selection rather than risk a
+  stale highlight after a re-wrap.
 
 ## What is tested
 
-- 163 unit tests (`bun test`, see `tui/test/*.test.ts`): terminal
+- 173 unit tests (`bun test`, see `tui/test/*.test.ts`): terminal
   buffer/diff, input parsing, layout/scroll math, widgets, markdown
   rendering, selection/clipboard (T0-T2), the client's SSE termination
   handling, `config.toml` parsing, approval/pull/pairing client calls,
-  and the QR half-block rendering logic (T3).
+  the QR half-block rendering logic, and the Chat screen's
+  selection-to-line clamping math (T3).
 - Go side: `internal/approval` (9 tests, including a genuine
   self-deadlock caught by `go test -race -timeout`), 3 new HTTP
   integration tests for the approval endpoints (end-to-end blocking
@@ -88,7 +102,12 @@ only what is true right now.
   UI is typechecked and unit-tested piece by piece, but the full loop
   (a real shell command blocks, the TUI's Approvals screen shows it,
   approving it from the TUI actually lets the command run) has not
-  been driven end-to-end with a real terminal attached.
+  been driven end-to-end with a real terminal attached. Mouse
+  selection is the same story: `clampSelectionToLine` (the per-line
+  highlight math) is unit-tested, and the click/drag/copy wiring
+  typechecks against the real `MouseEvent` shape `src/term/input.ts`
+  parses from SGR 1006 sequences, but no real mouse has driven it in
+  an actual terminal emulator in this environment.
 
 ## What is not built yet
 
@@ -98,11 +117,6 @@ only what is true right now.
   on this PC for dangerous actions" override from the Runyx Code
   mission's §7 need Remote Control's device identity threaded through,
   which is C2 scope in `docs/RUNYX_CODE.md`.
-- **Mouse + text selection inside the Chat transcript**: T2's
-  selection/clipboard engine is built and unit-tested against
-  synthetic `RenderedLine[]`, but the Chat screen does not yet wire
-  mouse drag events to it (no click-to-select, no double/triple-click,
-  no Copy button) -- it currently only scrolls with Up/Down.
 - **T4, done**: `runyx tui` / bare `runyx` on a real terminal now exec
   the sibling `runyx-tui` binary (`cmd/runyx/cmd_tui.go`, 5 new Go
   tests); `--dump-frame <path>` renders the Ctrl+K palette to SVG
