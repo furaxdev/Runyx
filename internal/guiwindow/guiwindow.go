@@ -37,7 +37,11 @@ var ErrNoNativeWindow = errors.New("native window not available")
 // same way `runyx serve` blocks: a caller that tears down its daemon
 // via defer right after Open returns (as cmdGUI does) must never see
 // Open return while that daemon is still the only thing serving the
-// tab it just opened.
+// tab it just opened. On Linux/BSD, Open fails fast instead of ever
+// reaching that blocking wait when there's no X11/Wayland session to
+// open a browser in at all (see requireDisplaySession) -- otherwise a
+// headless invocation with xdg-open merely *installed* but nothing to
+// hand it off to would hang forever with nothing able to stop it.
 func Open(url, title string) error {
 	// Whether openNative failed because this build has no native
 	// support at all (ErrNoNativeWindow) or because it tried and the
@@ -51,12 +55,36 @@ func Open(url, title string) error {
 		return nil
 	}
 
+	if err := requireDisplaySession(); err != nil {
+		return err
+	}
 	if err := openDefaultBrowser(url); err != nil {
 		return err
 	}
 	waitForInterrupt()
 	return nil
 }
+
+// requireDisplaySession reports an error on Linux/BSD when neither X11
+// nor Wayland is available, so Open fails fast instead of spawning
+// xdg-open (which can itself be installed, and so successfully Start(),
+// on a headless box with no desktop session -- it just silently does
+// nothing useful there) and then blocking on waitForInterrupt forever
+// with no human or window ever able to signal it to stop. Windows'
+// `start` and macOS's `open` both require a real logged-in GUI session
+// to do anything at all, so there's no equivalent env-var check needed
+// there.
+func requireDisplaySession() error {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return nil
+	}
+	if os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "" {
+		return nil
+	}
+	return errNoDisplaySession
+}
+
+var errNoDisplaySession = errors.New("no X11 or Wayland display session found")
 
 // waitForInterrupt blocks until the process is asked to stop.
 func waitForInterrupt() {

@@ -56,13 +56,15 @@ func TestAcquireSingleInstanceLosesToReachableDaemon(t *testing.T) {
 
 // TestAcquireSingleInstanceRecoversFromStaleLock guards against a
 // crashed previous instance permanently locking Runyx out of ever
-// opening again: a lock file whose daemon doesn't actually answer must
-// be treated as stale and cleaned up, not as "someone else is running".
+// opening again: a lock file old enough that any legitimate startup
+// would have finished, whose daemon doesn't actually answer, must be
+// treated as stale and cleaned up, not as "someone else is running".
 func TestAcquireSingleInstanceRecoversFromStaleLock(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "gui.lock")
 	if err := os.WriteFile(lockPath, []byte("99999\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	backdateLock(t, lockPath, staleLockGracePeriod+time.Second)
 
 	won, err := acquireSingleInstance(lockPath, "127.0.0.1:1") // nothing listens on port 1
 	if err != nil {
@@ -70,6 +72,42 @@ func TestAcquireSingleInstanceRecoversFromStaleLock(t *testing.T) {
 	}
 	if !won {
 		t.Error("expected to win and recover from a stale lock file whose daemon is unreachable")
+	}
+}
+
+// TestAcquireSingleInstanceDoesNotStealLockDuringStartup guards the
+// real race ensureDaemonRunning's up-to-10s startup window creates: a
+// freshly created lock file backed by a daemon that isn't reachable
+// *yet* must not be mistaken for a crash. Stealing it here would let a
+// second process bind the same listen address the first is still
+// starting up on, instead of reporting "Runyx is already running."
+func TestAcquireSingleInstanceDoesNotStealLockDuringStartup(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "gui.lock")
+	if err := os.WriteFile(lockPath, []byte("99999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Lock file's mtime is "now" (just created), well inside the grace
+	// period -- simulates another instance that is still mid-startup.
+
+	won, err := acquireSingleInstance(lockPath, "127.0.0.1:1") // its daemon isn't up yet
+	if err != nil {
+		t.Fatalf("acquireSingleInstance: %v", err)
+	}
+	if won {
+		t.Error("expected to lose against a fresh lock file whose owner may still be starting its daemon")
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Errorf("expected the original lock file to survive untouched, stat err: %v", statErr)
+	}
+}
+
+// backdateLock sets lockPath's modification time to age in the past,
+// simulating a lock file created that long ago.
+func backdateLock(t *testing.T, lockPath string, age time.Duration) {
+	t.Helper()
+	past := time.Now().Add(-age)
+	if err := os.Chtimes(lockPath, past, past); err != nil {
+		t.Fatalf("backdate lock file: %v", err)
 	}
 }
 

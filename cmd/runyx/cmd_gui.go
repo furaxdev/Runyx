@@ -50,6 +50,12 @@ func cmdGUI(args []string) error {
 	return guiwindow.Open(url, "Runyx")
 }
 
+// staleLockGracePeriod must exceed ensureDaemonRunning's own 10s
+// readiness timeout: a legitimate instance holds the lock from the
+// moment it's created, before its daemon can possibly answer yet, so
+// "unreachable" alone can't mean "stale" during that startup window.
+const staleLockGracePeriod = 15 * time.Second
+
 // acquireSingleInstance reports whether this process should proceed as
 // the one-and-only Runyx GUI instance. It wins outright if it's the
 // first to atomically create lockPath (O_EXCL makes "did I create this
@@ -58,15 +64,22 @@ func cmdGUI(args []string) error {
 // reachable at listenAddr before deciding what that means: a reachable
 // daemon means a real instance (this one or a plain `runyx serve`) is
 // genuinely running, so this process should not proceed. An
-// unreachable daemon means the lock file is stale -- left behind by a
-// crash, not a graceful shutdown that would have removed it -- and is
-// safe to clean up and retry once.
+// unreachable daemon only means the lock is stale -- left behind by a
+// crash, not a graceful shutdown that would have removed it -- once
+// the lock is also older than staleLockGracePeriod; otherwise another
+// instance may simply still be starting its daemon (see
+// ensureDaemonRunning), and stealing its lock mid-startup would let
+// both processes race to bind the same listen address.
 func acquireSingleInstance(lockPath, listenAddr string) (won bool, err error) {
 	if createLockFile(lockPath) {
 		return true, nil
 	}
 
 	if daemonReachable(listenAddr) {
+		return false, nil
+	}
+
+	if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) < staleLockGracePeriod {
 		return false, nil
 	}
 

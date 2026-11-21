@@ -1082,3 +1082,46 @@ correctness bugs in the native-window startup path, both fixed here:
    first, then asserts `ensureDaemonRunning` returns in well under the
    10s timeout) guards the fix; `go test -race ./...` is green across
    the whole repo.
+
+## 2026-11-21 — A second review pass on the same code found two more real bugs
+
+Re-reviewing `cmd_gui.go`/`guiwindow` after the entry above (itself
+written in response to a review) turned up two further genuine
+issues, one of them a regression introduced by that very fix:
+
+1. **The SIGINT/SIGTERM wait added above can now hang forever on a
+   headless Linux box.** Bare `runyx` always tries to open a GUI
+   window (see `main.go`'s own comment: that's the whole point of this
+   being "a real application" rather than something you have to
+   remember flags for). On a machine with no native webview build and
+   no browser installed for app-mode, `openDefaultBrowser` tries
+   `xdg-open`. In a container or CI image that happens to have
+   `desktop-file-utils` installed (common — it's a transitive
+   dependency of several things) but no actual X11/Wayland session,
+   `xdg-open url` still starts successfully (`cmd.Start()` only checks
+   that *launching* the process worked) and does nothing useful, while
+   `Open` now blocks on `waitForInterrupt()` with no human or window
+   ever able to send it a signal. Fixed by checking for a real display
+   session (`DISPLAY`/`WAYLAND_DISPLAY`) before even attempting
+   `xdg-open` on Linux/BSD, failing fast with a clear error instead --
+   Windows/macOS need no such check, since `start`/`open` both require
+   a real logged-in GUI session to do anything at all, with no
+   equivalent env var to probe.
+2. **The single-instance lock could be stolen out from under a
+   slow-starting instance.** `acquireSingleInstance` treated *any*
+   unreachable-daemon lock file as stale and safe to steal.
+   `ensureDaemonRunning` legitimately allows up to 10s for a daemon to
+   become ready, and the lock file is created well before that --  so
+   a second `runyx` launched during a first instance's own (slow)
+   startup window would see "lock exists, daemon not reachable yet"
+   and conclude the first instance had crashed, delete its lock, and
+   start its own daemon on the same listen address -- both then racing
+   to bind the same port instead of the second one cleanly printing
+   "Runyx is already running." Fixed with a `staleLockGracePeriod`
+   (15s, deliberately longer than the 10s startup timeout): a lock
+   newer than that is never treated as stale regardless of
+   reachability.  `TestAcquireSingleInstanceDoesNotStealLockDuringStartup`
+   locks in the fix; the pre-existing stale-lock-recovery test now
+   backdates its lock file's mtime past the grace period, since a
+   freshly written one would otherwise (correctly) no longer be
+   recovered.
