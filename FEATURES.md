@@ -86,6 +86,24 @@ verify on real hardware.
       connection is plain HTTP, restricted in code to private LAN
       ranges and `.local` names (Android's `network_security_config.xml`
       can't express that restriction by subnet).
+- [x] GPU Saver / CPU Saver (not in the original numbered spec) — large
+      MoE models that don't comfortably fit in RAM+VRAM can be served
+      via [colibri](https://github.com/JustVugg/colibri) instead of
+      llama-server, streaming unused experts from disk. Off by default
+      (`gpu_saver_enabled` in config.toml); never fetched or run
+      automatically — `runyx gpu-saver import <model>` is the one
+      explicit, visible step that both fetches colibri and converts a
+      model for it. `internal/colibri`'s Fetcher is unit tested against
+      a fake release server (same "tested selection logic, not
+      exercised against the real network in this sandbox" caveat as
+      llama.cpp/whisper.cpp — see docs/BLOCKED.md); its asset naming
+      and archive layout (a flat `coli` Python launcher beside native
+      engine binaries and shaders) were verified against a real
+      download of colibri v2.1.0's Linux release, not guessed from
+      documentation. The "is this worth it" recommendation
+      (`colibri.Recommended`) matches known MoE family names, not real
+      GGUF architecture metadata Runyx doesn't parse yet — an honest
+      heuristic, not a guarantee; see docs/DECISIONS.md.
 
 ## M2 — Chat & UI
 

@@ -45,6 +45,15 @@ export interface UpdateCheckResult {
   error?: string;
 }
 
+export interface GPUSaverStatus {
+  enabled: boolean;
+  available: boolean;
+  recommended?: boolean;
+  reason?: string;
+  imported?: boolean;
+  in_use?: boolean;
+}
+
 export interface DeviceInfo {
   id: string;
   name: string;
@@ -149,6 +158,8 @@ export const api = {
   search: (q: string) => fetch(`/api/runyx/search?q=${encodeURIComponent(q)}`).then((r) => json<Message[]>(r)),
   dashboard: () => fetch("/api/runyx/dashboard").then((r) => json<DashboardStats>(r)),
   checkUpdate: () => fetch("/api/runyx/update").then((r) => json<UpdateCheckResult>(r)),
+  gpuSaverStatus: (model?: string) =>
+    fetch(`/api/runyx/gpu-saver${model ? `?model=${encodeURIComponent(model)}` : ""}`).then((r) => json<GPUSaverStatus>(r)),
   models: () => fetch("/v1/models").then((r) => json<{ data: { id: string }[] }>(r)),
   tags: () => fetch("/api/tags").then((r) => json<{ models: ModelEntry[] }>(r)),
   permissions: () => fetch("/api/runyx/permissions").then((r) => json<PermissionsSnapshot>(r)),

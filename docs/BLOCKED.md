@@ -23,6 +23,33 @@ exercised against the real network in this environment:
   parsing) and real ffmpeg conversion, but no real speech was ever
   transcribed or synthesized here.
 
+## GPU Saver (colibri): verified further than the fetchers above, but still not run end to end
+
+Unlike the two fetchers above, this session *did* get real, successful
+network access to `github.com/JustVugg/colibri` (anonymous git clone,
+and a real download of its v2.1.0 Linux release) — enough to verify
+the actual release asset names, the real (flat, no leading directory)
+archive layout, and `coli`'s real CLI flags (`serve --model --host
+--port --model-id --api-key`, `import <gguf> --out <dir>`) by running
+`coli --help`/`coli serve --help`/`coli import --help` for real and by
+extracting a real downloaded archive, rather than guessing from
+documentation. `internal/colibri`'s Fetcher, PickAsset, and
+ServeCommand/ImportCommand are built against those verified facts.
+
+**Still not exercised, and honestly can't be from here**: no real GGUF
+file (of any size) was available in this sandbox, so `coli import` was
+only ever run against a deliberately invalid file (confirming its real
+GGUF-magic-byte validation error, not a successful conversion), and
+`coli serve` was never actually started against a real imported model
+— so the full Runyx-launches-colibri-as-a-subprocess path
+(`backend.Manager.Start` with `StartOptions.UseColibri`, through
+`waitHealthy` to a real `/health` response, through to a real
+`/v1/chat/completions` reply) is implemented and unit tested piece by
+piece but not proven end to end. A maintainer with a real large MoE
+GGUF and Python 3.10+ should run through `runyx gpu-saver import
+<model>` followed by a real chat request before trusting this feature
+in production.
+
 **Not actually blocked for a normal user**: outside this sandbox, with
 normal internet access, both fetchers hit real, public, officially
 documented release APIs and should work as-is. A maintainer with normal

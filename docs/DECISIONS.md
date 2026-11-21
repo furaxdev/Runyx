@@ -1261,3 +1261,80 @@ message). That distinction holds regardless of how long either one
 took to actually get scheduled and observed, which is the thing this
 environment can't guarantee. `go test -race ./...` is green across the
 whole repo with this change.
+
+## 2026-11-21 — GPU Saver / CPU Saver: colibri as an alternative backend, not a parallel system
+
+Added a new, opt-in way to serve very large MoE models: colibri
+(https://github.com/JustVugg/colibri) streams the experts a token
+doesn't need straight from disk instead of requiring the whole model
+resident in RAM/VRAM. Design choices, and why:
+
+- **An extra `StartOptions` on the existing `backend.Manager`, not a
+  parallel colibri-specific manager.** `backend.Instance` is already
+  just "ModelName + Port + BaseURL" plus process-lifecycle bookkeeping,
+  and every downstream consumer (the OpenAI/Ollama proxy handlers) only
+  ever talks to `inst.BaseURL` over HTTP — it has no idea what's
+  actually listening there. colibri's own `coli serve` is also
+  OpenAI-compatible with a `/health` endpoint, so it slots into exactly
+  that same contract: `Manager.Start` picks which command to exec
+  (`llama-server ...` or `python3 coli serve ...`) based on
+  `StartOptions.UseColibri`, and everything downstream — eviction, idle
+  timeout, the VRAM budget, the HTTP proxy — is unchanged and shared,
+  not duplicated. `Instance.Engine` records which one actually ran, for
+  honest reporting (`GET /api/runyx/gpu-saver`'s `in_use` field).
+- **`coli import` (GGUF -> colibri's own model-directory format) is
+  never triggered automatically.** Verified against a real downloaded
+  v2.1.0 release: `coli serve --model` expects an already-converted
+  model directory, not a raw `.gguf` path. For a model large enough
+  that GPU Saver is actually recommended, that conversion step can take
+  a long time — running it synchronously inside a chat request's
+  handler would turn an ordinary HTTP request into an unbounded,
+  surprise multi-minute-or-longer hang. `runyx gpu-saver import
+  <model>` is the one explicit, visible place this runs, with the same
+  "real, can take a while, streams its own output" contract `runyx
+  pull` already has for downloads. `ensureInstance`'s colibri decision
+  (`Server.colibriStartOptions`) checks whether the import already
+  happened and silently falls back to llama-server if not, rather than
+  blocking on it — never a regression from today's behavior, since
+  llama-server is exactly what would have run anyway before GPU Saver
+  existed.
+- **Fetched lazily, never at daemon startup.** `cfg.GPUSaverEnabled`
+  only makes `Daemon.New` look for an *already-cached* colibri install
+  (`colibri.Fetcher.CachedLauncher`, no network call) — actually
+  fetching colibri (tens of MB) only happens from `runyx gpu-saver
+  import`, the one place a user asked for it. Mirrors the project's
+  existing rule for `AgentWorkDir`/`InterpreterWorkDir`/web search: an
+  opt-in feature should never surprise anyone with new network traffic
+  or a new subprocess merely from starting the daemon.
+- **The recommendation is a named heuristic, not a guarantee.**
+  `colibri.Recommended` requires both "looks like a known MoE family by
+  name" (`LooksLikeMoE`, matching the families colibri's own README
+  documents: GLM, Mistral-Large, Kimi K3, DeepSeek, MiMo, Qwen3.6/3.8,
+  OLMoE, Inkling) and "doesn't comfortably fit in RAM+VRAM" (a 1.3x
+  headroom margin — a model that merely fits is still better served by
+  llama-server's ordinary GPU offload). Runyx doesn't parse a GGUF's
+  real architecture/`expert_count` metadata yet, so this is a name
+  match, not ground truth — a dense model with "moe" nowhere in its
+  name/repo string won't be *mis-recommended* (the false-negative
+  direction is safe: worst case, someone manually imports a model that
+  wouldn't have helped), but a correctly-named MoE checkpoint under an
+  unusual alias could be under-recommended. Stated honestly rather than
+  presented as more precise than it is; real GGUF metadata parsing is a
+  natural follow-up (see docs/ROADMAP.md).
+- **No live API/UI toggle.** Every other config.toml-only setting in
+  this project (`agent_work_dir`, `interpreter_work_dir`) is edited by
+  hand and read-only from the HTTP API/UI; `config.Save` exists but is
+  never called from a live request handler anywhere in the codebase.
+  `gpu_saver_enabled` follows that same, already-established pattern
+  rather than introducing a new "the server mutates its own config
+  file from an HTTP request" capability that doesn't exist anywhere
+  else yet. The web UI's Settings page and `GET /api/runyx/gpu-saver`
+  are read-only status, same as the "About" update-checker section
+  right above them.
+
+See `docs/BLOCKED.md` for exactly what was and wasn't verified against
+colibri's real release and CLI (a real download and real `--help`
+output, but no real GGUF import/serve end to end — none was available
+in this sandbox) and `docs/USAGE.md` for the user-facing walkthrough.
+`go test -race ./...` is green across the whole repo; `npm run
+check`/`build`/`test` are clean for the web change.

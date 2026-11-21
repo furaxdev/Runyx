@@ -58,6 +58,8 @@ func main() {
 		err = cmdBench(args)
 	case "update":
 		err = cmdUpdate(args)
+	case "gpu-saver":
+		err = cmdGPUSaver(args)
 	case "help", "-h", "--help":
 		printUsage()
 		return
@@ -105,5 +107,7 @@ Usage:
   runyx mcp-serve              Expose Runyx's tools over MCP (stdio)
   runyx bench <model> [prompt]  Measure tokens/sec and time-to-first-token
   runyx update                 Check for (and, once signed, apply) updates
+  runyx gpu-saver status [model]  Show GPU Saver (colibri) status, and whether a model is recommended
+  runyx gpu-saver import <model>  Fetch colibri (if needed) and convert a model so it can be served via GPU Saver
 `)
 }

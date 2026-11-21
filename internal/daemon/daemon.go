@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/furaxdev/runyx/internal/agent"
 	"github.com/furaxdev/runyx/internal/approval"
 	"github.com/furaxdev/runyx/internal/automation"
 	"github.com/furaxdev/runyx/internal/backend"
+	"github.com/furaxdev/runyx/internal/colibri"
 	"github.com/furaxdev/runyx/internal/config"
 	"github.com/furaxdev/runyx/internal/history"
 	"github.com/furaxdev/runyx/internal/hwdetect"
@@ -121,6 +123,20 @@ func New(cfg config.Config, backendBinary string) (*Daemon, error) {
 	}
 	if piperBin, err := exec.LookPath("piper"); err == nil {
 		d.Synthesizer = &voice.Synthesizer{BinaryPath: piperBin}
+	}
+	if cfg.GPUSaverEnabled {
+		// Only ever resolve an already-cached colibri install here --
+		// never fetch over the network from inside daemon startup; see
+		// colibri.Fetcher.CachedLauncher's own doc comment for why.
+		// Nothing found just means GPU Saver stays recommended-but-
+		// unavailable until `runyx gpu-saver import` fetches it.
+		fetcher := colibri.NewFetcher(filepath.Join(cfg.BackendsDir, "colibri"))
+		if launcherPath, ok := fetcher.CachedLauncher(hw); ok {
+			if pythonPath, err := colibri.FindPython(); err == nil {
+				mgr.ColibriPython = pythonPath
+				mgr.ColibriLauncher = launcherPath
+			}
+		}
 	}
 	d.Remote = &remote.Router{Providers: map[string]remote.Provider{}}
 	d.Plugins = plugin.NewManager()

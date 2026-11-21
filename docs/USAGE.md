@@ -29,6 +29,44 @@ import --ollama` scan will register them without re-downloading — the
 scanning logic is in `internal/modelstore.ScanOllamaModels` today; wiring
 it to a CLI subcommand is a short follow-up.
 
+## GPU Saver / CPU Saver (colibri)
+
+For very large MoE ("mixture of experts") models that don't comfortably
+fit in this machine's RAM+VRAM — GLM, Mistral-Large, Kimi K3, DeepSeek,
+MiMo, Qwen3.6/3.8, OLMoE, Inkling — Runyx can serve them via
+[colibri](https://github.com/JustVugg/colibri) instead of llama-server:
+colibri streams the experts a token doesn't need straight from disk,
+instead of requiring the whole model resident. Off by default, and
+never fetched or run unless you turn it on:
+
+```toml
+# config.toml
+gpu_saver_enabled = true
+```
+
+```bash
+./runyx gpu-saver status [model]   # is colibri fetched; is a model recommended
+./runyx gpu-saver import <model>   # fetch colibri (first time only) and convert a model for it
+```
+
+`import` is a real, visible, potentially long-running step for a very
+large model — the same contract `pull` already has for downloads — and
+is never triggered automatically from inside a chat request. Once a
+recommended model has been imported, the daemon serves it via colibri
+automatically on its next load; `GET /api/runyx/gpu-saver?model=<name>`
+reports whether a given model is recommended and already imported, and
+the web UI's Settings page shows the same thing.
+
+**Real requirements, stated plainly**: colibri needs Python 3.10+ on
+PATH (its own launcher is a Python script; its inference engines are
+native binaries, fetched like llama-server). Its prebuilt releases only
+cover Linux/x86_64, Windows/x86_64 (with a separate CUDA add-on), and
+macOS/Apple Silicon — Linux/arm64 and Intel Macs have no prebuilt asset
+to fetch. `colibri.Recommended` (the "is this worth it" check) matches
+known MoE model families by name, not real GGUF architecture metadata
+Runyx doesn't parse yet — see docs/DECISIONS.md for the honest limits
+of that heuristic.
+
 ## Chat
 
 ```bash

@@ -81,7 +81,7 @@ func cmdRun(args []string) error {
 	fmt.Printf("Loading %s...\n", mdl.Name)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	inst, err := mgr.Start(ctx, mdl, mdl.Tuning)
+	inst, err := mgr.Start(ctx, mdl, mdl.Tuning, backend.StartOptions{})
 	if err != nil {
 		return fmt.Errorf("start model: %w", err)
 	}

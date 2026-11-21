@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type UpdateCheckResult } from "./api";
+  import { api, type UpdateCheckResult, type GPUSaverStatus } from "./api";
 
   export let theme: "system" | "light" | "dark";
   export let reduceMotion: boolean;
@@ -23,8 +23,10 @@
   // anything on its own (see docs/DECISIONS.md on why automatic apply
   // stays refused until a real release signing key exists).
   let updateInfo: UpdateCheckResult | null = null;
+  let gpuSaver: GPUSaverStatus | null = null;
   onMount(async () => {
     updateInfo = await api.checkUpdate().catch(() => null);
+    gpuSaver = await api.gpuSaverStatus().catch(() => null);
   });
 </script>
 
@@ -47,6 +49,29 @@
         Reduce motion
       </label>
     </div>
+  </section>
+
+  <section>
+    <h2>GPU Saver</h2>
+    {#if gpuSaver}
+      {#if gpuSaver.enabled}
+        <p class="version-row">
+          Enabled. colibri is {gpuSaver.available ? "fetched and ready" : "not fetched yet"}.
+        </p>
+        {#if !gpuSaver.available}
+          <p class="version-row muted">
+            Run <code>runyx gpu-saver import &lt;model&gt;</code> once for a model you want served this way.
+          </p>
+        {/if}
+      {:else}
+        <p class="version-row muted">
+          Off. For very large MoE models that don't fit in RAM/VRAM, GPU Saver streams unused experts from disk
+          instead (via <a href="https://github.com/JustVugg/colibri" target="_blank" rel="noreferrer">colibri</a>).
+          Turn it on with <code>gpu_saver_enabled = true</code> in config.toml, then
+          <code>runyx gpu-saver import &lt;model&gt;</code> for a recommended model.
+        </p>
+      {/if}
+    {/if}
   </section>
 
   <section>
@@ -107,6 +132,15 @@
   }
   .version-row.muted {
     color: var(--text-muted);
+  }
+  .version-row code {
+    font-family: var(--font-mono);
+    background: var(--bg-sunken);
+    border-radius: 4px;
+    padding: 0.1rem 0.3rem;
+  }
+  .version-row a {
+    color: var(--accent);
   }
   .update-banner {
     display: flex;

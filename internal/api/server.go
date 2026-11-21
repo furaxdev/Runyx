@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/furaxdev/runyx/internal/backend"
+	"github.com/furaxdev/runyx/internal/colibri"
 	"github.com/furaxdev/runyx/internal/history"
 	"github.com/furaxdev/runyx/internal/hwdetect"
 	"github.com/furaxdev/runyx/internal/modelstore"
@@ -23,6 +26,12 @@ type Server struct {
 	// those routes' storage — RegisterKnowledge callers should only
 	// call it when History is set.
 	History *history.Store
+
+	// GPUSaverEnabled mirrors config.Config.GPUSaverEnabled. False (the
+	// default) means ensureInstance never considers colibri at all,
+	// regardless of whether Manager.ColibriPython/ColibriLauncher are
+	// set.
+	GPUSaverEnabled bool
 }
 
 // NewServer returns a Server ready to have its routes registered.
@@ -85,11 +94,39 @@ func (s *Server) ensureInstance(ctx context.Context, modelName string) (*backend
 		_ = s.Store.Put(mdl) // cache for next time; best-effort
 	}
 
-	inst, err := s.Manager.Start(ctx, mdl, tuning)
+	inst, err := s.Manager.Start(ctx, mdl, tuning, s.colibriStartOptions(mdl))
 	if err != nil {
 		return nil, modelstore.Model{}, err
 	}
 	return inst, mdl, nil
+}
+
+// colibriStartOptions decides whether mdl should be served via colibri
+// ("GPU Saver"/"CPU Saver") instead of llama-server: GPUSaverEnabled is
+// on, colibri is actually available on this daemon, colibri.Recommended
+// agrees this model is worth it, AND the model has already been
+// imported (via `runyx gpu-saver import`, see cmd_gpu_saver.go -- a
+// one-time, potentially long-running conversion deliberately never
+// triggered automatically from inside a request handler). Any of those
+// not holding falls through to llama-server exactly as before GPU
+// Saver existed; it's never used as a surprise.
+func (s *Server) colibriStartOptions(mdl modelstore.Model) backend.StartOptions {
+	if !s.GPUSaverEnabled || s.Manager.ColibriPython == "" || s.Manager.ColibriLauncher == "" {
+		return backend.StartOptions{}
+	}
+	rec := colibri.Recommended(s.HW, mdl.SizeBytes, mdl.Name+" "+mdl.Repo)
+	if !rec.Recommended {
+		return backend.StartOptions{}
+	}
+	modelDir := colibri.ImportedModelDir(filepath.Dir(s.Manager.ColibriLauncher), filepath.Base(mdl.File))
+	if _, err := os.Stat(modelDir); err != nil {
+		// Recommended but not imported yet -- fall back to llama-server
+		// rather than blocking this request on a potentially very long
+		// `coli import` run. GET /api/runyx/gpu-saver surfaces this case
+		// to the user instead.
+		return backend.StartOptions{}
+	}
+	return backend.StartOptions{UseColibri: true, ColibriModelDir: modelDir}
 }
 
 type notFoundError string

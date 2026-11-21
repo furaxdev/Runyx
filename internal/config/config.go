@@ -41,6 +41,18 @@ type Config struct {
 	// interpreter (item 22) scoped to this directory. Empty (the
 	// default) disables it entirely, for the same reason.
 	InterpreterWorkDir string `toml:"interpreter_work_dir"`
+
+	// GPUSaverEnabled turns on "GPU Saver"/"CPU Saver": for models that
+	// look like a known MoE family and don't comfortably fit in this
+	// machine's RAM+VRAM, Runyx serves them via colibri
+	// (github.com/JustVugg/colibri) instead of llama-server, streaming
+	// unused experts from disk instead of requiring the whole model
+	// resident. False (the default) means Runyx behaves exactly as
+	// before this existed: colibri is never fetched or run. See
+	// docs/USAGE.md for what this needs (Python 3.10+) and
+	// `runyx gpu-saver import` for the one-time step a recommended
+	// model needs before it's actually served this way.
+	GPUSaverEnabled bool `toml:"gpu_saver_enabled"`
 }
 
 // Default returns the configuration used when no config file exists yet.

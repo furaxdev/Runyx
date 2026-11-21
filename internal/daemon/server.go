@@ -17,6 +17,7 @@ func (d *Daemon) NewHTTPServer() *http.Server {
 	mux := http.NewServeMux()
 	apiServer := api.NewServer(d.Store, d.Manager, d.HW)
 	apiServer.History = d.History
+	apiServer.GPUSaverEnabled = d.Config.GPUSaverEnabled
 	apiServer.Register(mux)
 	extras := &api.RunyxExtras{
 		History:       d.History,
