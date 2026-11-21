@@ -1192,3 +1192,39 @@ what this can actually promise: "this is a different release", not "a
 numerically greater one". `go test -race ./...` is green across the
 whole repo; `npm run check`/`build`/`test` are clean for the web
 change.
+
+## 2026-11-21 — Real CI failure: hwdetect's GPU probes had no timeout
+
+CI failed `TestEnsureDaemonRunningFailsFastWhenPortInUse` for real on
+this PR -- not locally (where `nvidia-smi`/`rocm-smi` simply aren't on
+`$PATH` and `exec.Command` fails instantly with "not found"), but on
+GitHub's own runner, where `ensureDaemonRunning` took 28-33 seconds to
+fail instead of the sub-second it should. The test itself was correct;
+`daemon.New()` -- called synchronously, before that test's own
+race-the-readiness-poll logic even starts -- runs
+`hwdetect.Detect()`, and `internal/hwdetect/gpu.go`'s
+`detectNVIDIA`/`detectAMD`/`detectAppleSilicon` called `exec.Command`
+with no timeout at all. Whatever made the CI runner's probe hang (the
+exact cause wasn't tracked down -- a slow/incomplete driver stub is
+the leading guess, and it doesn't matter which) turned an
+"instant ENOENT" into a real multi-second-per-tool stall, which would
+just as easily hit a real user's machine with a half-installed GPU
+driver stack. This was flagged as a known gap in the stale-lock-margin
+entry above ("a separate, pre-existing gap") and dismissed as
+out of scope at the time; it stopped being theoretical within the same
+session.
+
+Fixed with `gpuProbeTimeout = 3 * time.Second` via
+`exec.CommandContext`, wrapping each of the three vendor-tool calls.
+Verified with a fixture that actually proves the kill works: a fake
+binary that does `exec sleep 30` (not `sleep 30` as a child of a
+shell) -- the first attempt used a plain child process, which stayed
+alive holding the stdout pipe open for the full 30s even after
+`exec.CommandContext` killed the shell on timeout, since killing a
+process never kills its own children. `exec` replaces the shell's
+process image via execve instead of forking, so there's a single real
+process to kill, matching how an actual hung vendor tool behaves.
+`TestEnsureDaemonRunningFailsFastWhenPortInUse`'s own threshold moved
+from 5s to 15s (comfortable margin above the now-real worst case of
+two sequential 3s probes) rather than tightening `gpuProbeTimeout`
+itself to fit an arbitrary test budget.

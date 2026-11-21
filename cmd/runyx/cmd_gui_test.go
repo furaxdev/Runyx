@@ -157,7 +157,15 @@ func TestEnsureDaemonRunningFailsFastWhenPortInUse(t *testing.T) {
 		}
 		t.Fatal("expected an error when the listen address is already bound")
 	}
-	if elapsed > 5*time.Second {
+	// daemon.New() (called synchronously, before the race-the-readiness
+	// logic this test is actually guarding even starts) runs
+	// hwdetect.Detect(), which is now bounded by gpuProbeTimeout per
+	// vendor-tool probe (see internal/hwdetect/gpu.go) -- worst case
+	// two sequential probes on Linux/Windows. 15s gives that real bound
+	// comfortable margin for CI scheduling jitter while still catching
+	// a real regression back to the old "waits out the full 10s+
+	// readiness timeout" behavior this test exists to guard against.
+	if elapsed > 15*time.Second {
 		t.Errorf("ensureDaemonRunning took %s to fail -- looks like it waited out the full readiness timeout instead of catching the daemon's own startup error", elapsed)
 	}
 }
