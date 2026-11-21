@@ -1125,3 +1125,34 @@ issues, one of them a regression introduced by that very fix:
    backdates its lock file's mtime past the grace period, since a
    freshly written one would otherwise (correctly) no longer be
    recovered.
+
+## 2026-11-21 — Three more small, real fixes from continued review
+
+- **`staleLockGracePeriod` was still too tight.** It only covered
+  `ensureDaemonRunning`'s own 10s readiness poll, not the time
+  `resolveBackendBinary` (up to a 5s fetch-context timeout on a cold
+  cache) and `daemon.New` (runs `hwdetect.Detect()`, which can shell
+  out to `nvidia-smi`/`rocm-smi`) can add *before* that poll even
+  starts. Widened to 30s with a comment admitting the honest limit:
+  this still doesn't cover `hwdetect`'s GPU-tool subprocesses hanging
+  outright, since those have no timeout of their own -- a separate,
+  pre-existing gap.
+- **Android's chat header claimed "Connected" unconditionally.**
+  `RunyxViewModel` has no real connection-state tracking (no
+  heartbeat), so the label never reflected a failed request or a
+  dropped pairing -- it just always said "Connected." Changed it to
+  only ever show a problem ("Connection issue", in the error color)
+  when `chatError` is actually set, reusing the same signal the
+  error banner below the transcript already uses, instead of
+  claiming good health it has no way to verify.
+- **The TUI chat screen's arrow-key and mouse-wheel scroll handlers
+  passed a fabricated `{ count: 10000, ... }` `RowHeights` to
+  `scrollBy`**, which does `O(count)` work internally (a full sum
+  over every row plus a from-end walk) -- so every single keypress or
+  wheel tick paid for a transcript 10000 lines larger than it ever
+  actually is, even in a 20-line conversation. The final scrolled
+  position was always correct regardless (the next `draw()` re-clamps
+  against the real line count), so this was pure wasted work, not a
+  visible bug. Replaced with the real count from the same flat index
+  (`src/selection/selection.ts`'s `buildFlatIndex`) the mouse-selection
+  code already builds and caches every frame.

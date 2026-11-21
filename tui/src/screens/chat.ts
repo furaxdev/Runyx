@@ -249,6 +249,17 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
     return positionToOffset(lastFlat, v.index, col0);
   }
 
+  /**
+   * The real row count for scroll math, taken from the last draw()'s
+   * flat index (one entry per transcript line) rather than a fabricated
+   * upper bound -- clampScroll/scrollBy both do O(count) work internally,
+   * so a stand-in like 10000 would make every arrow-key or wheel tick
+   * pay for a transcript 10000 lines larger than it actually is.
+   */
+  function scrollRows(): RowHeights {
+    return { count: lastFlat.length, heightOf: () => 1 };
+  }
+
   function clearSelection(): void {
     selAnchor = null;
     selActive = null;
@@ -284,8 +295,8 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
       else if (e.key === "Delete") input.deleteForward();
       else if (e.key === "Left") input.moveLeft();
       else if (e.key === "Right") input.moveRight();
-      else if (e.key === "Up") scroll = scrollBy(scroll, { count: 10000, heightOf: () => 1 }, 1, -1);
-      else if (e.key === "Down") scroll = scrollBy(scroll, { count: 10000, heightOf: () => 1 }, 1, 1);
+      else if (e.key === "Up") scroll = scrollBy(scroll, scrollRows(), 1, -1);
+      else if (e.key === "Down") scroll = scrollBy(scroll, scrollRows(), 1, 1);
       else if (e.key.length === 1 && !e.ctrl) input.insert(e.key);
       terminal.requestRender();
     };
@@ -293,7 +304,7 @@ export async function runChatScreen(terminal: Terminal, client: RunyxClient, opt
     const onMouse = (e: TuiMouseEvent) => {
       if (quit) return;
       if (e.action === "wheel") {
-        scroll = scrollBy(scroll, { count: 10000, heightOf: () => 1 }, 1, e.button === "wheelUp" ? -3 : 3);
+        scroll = scrollBy(scroll, scrollRows(), 1, e.button === "wheelUp" ? -3 : 3);
         terminal.requestRender();
         return;
       }

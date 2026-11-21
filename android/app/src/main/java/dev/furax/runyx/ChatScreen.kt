@@ -72,11 +72,19 @@ fun ChatScreen(viewModel: RunyxViewModel, prefillText: String?) {
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                     )
-                    Text(
-                        "Connected",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    // No real connection-state tracking exists in
+                    // RunyxViewModel (no heartbeat/ping), so this never
+                    // claims "Connected" -- that would keep reading true
+                    // even after a failed request. It only ever surfaces
+                    // a known problem, from the same chatError a failed
+                    // send() or model load already sets.
+                    if (viewModel.chatError != null) {
+                        Text(
+                            "Connection issue",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             },
             actions = {

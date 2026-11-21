@@ -50,11 +50,18 @@ func cmdGUI(args []string) error {
 	return guiwindow.Open(url, "Runyx")
 }
 
-// staleLockGracePeriod must exceed ensureDaemonRunning's own 10s
-// readiness timeout: a legitimate instance holds the lock from the
-// moment it's created, before its daemon can possibly answer yet, so
-// "unreachable" alone can't mean "stale" during that startup window.
-const staleLockGracePeriod = 15 * time.Second
+// staleLockGracePeriod must exceed the full worst-case time from "lock
+// file created" to "daemon answers /api/tags", not just
+// ensureDaemonRunning's own 10s readiness poll: the lock is created
+// before resolveBackendBinary (up to a 5s fetch-context timeout) and
+// daemon.New (which runs hwdetect.Detect(), normally sub-second but
+// capable of shelling out to nvidia-smi/rocm-smi) even run, so both of
+// those are extra time a legitimate instance can take before the 10s
+// poll begins. 30s covers the realistic cold-cache-plus-slow-network
+// case with margin; it does not cover hwdetect's GPU-tool subprocesses
+// hanging outright, since those have no timeout of their own to bound
+// against (a separate, pre-existing gap, not introduced here).
+const staleLockGracePeriod = 30 * time.Second
 
 // acquireSingleInstance reports whether this process should proceed as
 // the one-and-only Runyx GUI instance. It wins outright if it's the
