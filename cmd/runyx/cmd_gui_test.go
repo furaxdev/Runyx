@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,7 +132,21 @@ func TestDaemonReachableFalseWhenNothingListens(t *testing.T) {
 // ensureDaemonRunning silently discarding a real startup error (e.g.
 // the listen address already being bound by something else) and
 // instead burning the full 10s readiness timeout before reporting a
-// generic "timed out" -- it must return promptly with the real cause.
+// generic "timed out" -- it must report the real cause.
+//
+// Asserts on the error's *content*, not wall-clock elapsed time: under
+// `go test -race ./...`'s full-repo cross-package parallelism, a CI
+// runner can be CPU-starved badly enough that even this test's own
+// background goroutines don't get scheduled for 20-30+ real seconds
+// -- not because anything is broken, but because dozens of other
+// packages' race-instrumented tests are all competing for 2 vCPUs at
+// once. That stretches every wall-clock duration in this test
+// uniformly, including the "it already failed, just hasn't been
+// scheduled to report it yet" case, so a duration threshold can't
+// actually distinguish fixed-and-slow from broken-and-slow here. The
+// error text can: the fixed code path's error always names the real
+// daemon exit, the broken one always says "timed out", regardless of
+// how long either took to surface under contention.
 func TestEnsureDaemonRunningFailsFastWhenPortInUse(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -148,24 +163,17 @@ func TestEnsureDaemonRunningFailsFastWhenPortInUse(t *testing.T) {
 		DataDir:     filepath.Join(dir, "data"),
 	}
 
-	start := time.Now()
 	stop, err := ensureDaemonRunning(cfg, "http://"+addr)
-	elapsed := time.Since(start)
 	if err == nil {
 		if stop != nil {
 			stop()
 		}
 		t.Fatal("expected an error when the listen address is already bound")
 	}
-	// daemon.New() (called synchronously, before the race-the-readiness
-	// logic this test is actually guarding even starts) runs
-	// hwdetect.Detect(), which is now bounded by gpuProbeTimeout per
-	// vendor-tool probe (see internal/hwdetect/gpu.go) -- worst case
-	// two sequential probes on Linux/Windows. 15s gives that real bound
-	// comfortable margin for CI scheduling jitter while still catching
-	// a real regression back to the old "waits out the full 10s+
-	// readiness timeout" behavior this test exists to guard against.
-	if elapsed > 15*time.Second {
-		t.Errorf("ensureDaemonRunning took %s to fail -- looks like it waited out the full readiness timeout instead of catching the daemon's own startup error", elapsed)
+	if strings.Contains(err.Error(), "timed out waiting for daemon to become ready") {
+		t.Errorf("ensureDaemonRunning reported a generic timeout instead of the daemon's real startup error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exited before becoming ready") {
+		t.Errorf("expected the error to report the daemon's own exit, got: %v", err)
 	}
 }

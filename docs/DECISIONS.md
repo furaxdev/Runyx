@@ -1228,3 +1228,36 @@ process to kill, matching how an actual hung vendor tool behaves.
 from 5s to 15s (comfortable margin above the now-real worst case of
 two sequential 3s probes) rather than tightening `gpuProbeTimeout`
 itself to fit an arbitrary test budget.
+
+## 2026-11-21 — The 15s threshold above was still wrong; the test needed to stop timing at all
+
+The `gpuProbeTimeout` fix was correct, but
+`TestEnsureDaemonRunningFailsFastWhenPortInUse` kept failing on CI
+afterward anyway, still at ~30s. GitHub-hosted `ubuntu-latest` runners
+don't have `nvidia-smi` on PATH any more than this sandbox does, so
+`hwdetect.Detect()` was never actually the bottleneck for this specific
+test -- it was a red herring that happened to be a real, worth-fixing
+bug in its own right, confirmed by `internal/hwdetect`'s own new tests
+(`internal/hwdetect` legitimately takes ~16s now, entirely from those
+tests deliberately proving their timeout bound against a fake hanging
+binary -- that's expected, not a regression).
+
+The real reason this test can't make a wall-clock assertion on this CI
+setup: `go test -race ./...` with no `-p 1` runs every package's tests
+as separate, concurrent, race-instrumented processes. On a
+resource-constrained runner, that's enough contention to starve this
+test's own background goroutines (the ones racing `ready` against
+`done` inside `ensureDaemonRunning`) for 20-30+ real seconds --
+independent of whether the code being tested is fast or slow. A
+duration threshold literally cannot distinguish "fixed, but descheduled
+for 25s under load" from "still broken" in that environment, no matter
+where the threshold is set.
+
+Replaced the timing assertion with a content assertion: the fixed code
+path's error always wraps "exited before becoming ready" (the daemon's
+own listen failure); the broken code path's error always says "timed
+out waiting for daemon to become ready" (the generic readiness-poll
+message). That distinction holds regardless of how long either one
+took to actually get scheduled and observed, which is the thing this
+environment can't guarantee. `go test -race ./...` is green across the
+whole repo with this change.
