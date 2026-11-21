@@ -98,8 +98,9 @@ verify on real hardware.
       reportlab); audio/video transcription plumbing tested against a
       fake whisper-cli binary + real ffmpeg; chunking for oversized
       content is implemented, actual RAG-based retrieval of chunks lands
-      with item 16 (M3). Drag-and-drop/paste in the UI not implemented —
-      file picker only.
+      with item 16 (M3). File picker, drag-and-drop, and clipboard paste
+      (a pasted screenshot or copied file, not just plain text) are all
+      wired in the Composer to the same upload pipeline.
 - [x] 29. UI identity — Svelte UI built and actually served by the daemon
       (verified live: `curl localhost:11535/` returns the built page);
       collapsible sidebar (Chat/Models/Agent tabs, recents grouped by

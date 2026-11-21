@@ -94,6 +94,27 @@
     await addFiles(files);
   }
 
+  // Pasting a screenshot (clipboard holds an unnamed image, no "Files"
+  // DataTransferItem) or a copied file both land here as clipboardData
+  // items of kind "file" -- separate from onDrop's DataTransfer.files,
+  // which clipboard paste never populates in any browser. Plain text
+  // paste (the overwhelmingly common case) has no "file" kind items and
+  // falls through untouched, so the browser's default paste-into-textarea
+  // behavior still runs.
+  async function onPaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of items) {
+      if (item.kind !== "file") continue;
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+    if (files.length === 0) return;
+    e.preventDefault();
+    await addFiles(files);
+  }
+
   async function toggleRecording() {
     if (recording) {
       mediaRecorder?.stop();
@@ -146,7 +167,7 @@
   class="composer"
   class:dragging
   role="group"
-  aria-label="Message composer, drop a file here to attach it"
+  aria-label="Message composer, drop or paste a file here to attach it"
   on:dragenter={onDragEnter}
   on:dragover={onDragOver}
   on:dragleave={onDragLeave}
@@ -173,6 +194,7 @@
     {placeholder}
     on:keydown={onKeydown}
     on:input={autoGrow}
+    on:paste={onPaste}
     rows="2"
     {autofocus}
   />

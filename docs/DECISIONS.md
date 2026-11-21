@@ -1027,3 +1027,22 @@ configuration choices beyond "copy the file."
   have" beyond what dpkg/pacman already give every Linux user by
   convention (a terminal they just used to install it in the first
   place).
+
+## 2026-11-21 — Clipboard paste for attachments (web Composer)
+
+`FEATURES.md`'s item 17 had drifted from the actual code: drag-and-drop
+onto the Composer was already fully implemented
+(`onDragEnter`/`onDragOver`/`onDragLeave`/`onDrop`, a real drop-overlay),
+but the note still said "not implemented" for both drag-and-drop *and*
+paste. Fixed the stale claim and closed the real gap: a `paste` handler
+on the textarea now checks `ClipboardEvent.clipboardData.items` for any
+`kind === "file"` entries (a pasted screenshot, or a file copied from
+the OS file manager) and routes them through the exact same
+`addFiles`/`api.uploadAttachment` pipeline the file picker and
+drag-and-drop already use -- `preventDefault()` only fires when a file
+was actually found, so ordinary text paste is untouched. `npm run
+check` (svelte-check), `npm run build`, and `npm test` all pass; there
+is no component-level test harness in `web/` yet (only `api.test.ts`
+exists), so this is verified the same way the pre-existing
+drag-and-drop code was: build + typecheck clean, not an automated DOM
+paste-event test.
