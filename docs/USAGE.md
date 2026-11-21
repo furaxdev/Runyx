@@ -138,6 +138,13 @@ runyx bench <model> [prompt]   # tokens/sec and time-to-first-token
 runyx update                   # checks GitHub for a newer release
 ```
 
+- `GET /api/runyx/update` — the daemon's own background check (every
+  6h, plus once on startup) for whether a newer release exists, cached
+  so this never blocks on a live GitHub call. The web UI's Settings
+  page reads this to show an "update available" notice. Same as
+  `runyx update`, it only ever checks and reports — it never downloads
+  or applies anything on its own.
+
 - `POST /api/runyx/arena` `{models: [...], prompt}` runs the same
   prompt against 2+ loaded models concurrently for a blind A/B/...
   comparison.

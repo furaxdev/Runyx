@@ -13,6 +13,7 @@ import (
 
 	"github.com/furaxdev/runyx/internal/convert"
 	"github.com/furaxdev/runyx/internal/history"
+	"github.com/furaxdev/runyx/internal/update"
 	"github.com/furaxdev/runyx/internal/vision"
 	"github.com/furaxdev/runyx/internal/voice"
 )
@@ -24,9 +25,10 @@ import (
 // feature off rather than panicking — e.g. no Transcriber means audio
 // attachments return a clear "not available" error instead of a 500.
 type RunyxExtras struct {
-	History     *history.Store
-	Transcriber *voice.Transcriber // nil if whisper.cpp isn't installed
-	Vision      *vision.Bridge     // nil if no OCR/auxiliary model is configured
+	History       *history.Store
+	Transcriber   *voice.Transcriber // nil if whisper.cpp isn't installed
+	Vision        *vision.Bridge     // nil if no OCR/auxiliary model is configured
+	UpdateChecker *update.Checker    // nil only in tests that don't wire it up
 }
 
 // RegisterRunyx wires Runyx-specific routes onto mux. Call in addition
@@ -43,6 +45,20 @@ func (s *Server) RegisterRunyx(mux *http.ServeMux, extras *RunyxExtras) {
 	mux.HandleFunc("GET /api/runyx/search", extras.handleSearch)
 	mux.HandleFunc("POST /api/runyx/attachments", extras.handleAttachment)
 	mux.HandleFunc("GET /api/runyx/dashboard", s.handleDashboard)
+	mux.HandleFunc("GET /api/runyx/update", extras.handleUpdateCheck)
+}
+
+// handleUpdateCheck serves the update checker's last cached result
+// instantly -- it never triggers a live GitHub call itself, since that
+// would block a page load on an external service. The background
+// Checker (internal/update.Checker, started by
+// Daemon.StartEvictionLoop) is what actually keeps this fresh.
+func (e *RunyxExtras) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if e.UpdateChecker == nil {
+		writeJSON(w, http.StatusOK, update.CheckResult{})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.UpdateChecker.Result())
 }
 
 func (e *RunyxExtras) requireHistory(w http.ResponseWriter) bool {

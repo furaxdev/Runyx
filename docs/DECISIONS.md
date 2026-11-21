@@ -1156,3 +1156,39 @@ issues, one of them a regression introduced by that very fix:
   visible bug. Replaced with the real count from the same flat index
   (`src/selection/selection.ts`'s `buildFlatIndex`) the mouse-selection
   code already builds and caches every frame.
+
+## 2026-11-21 — Automatic update *checking* (not applying)
+
+Added `internal/update.Checker`: a background loop, started alongside
+the existing idle-eviction loop in `Daemon.StartEvictionLoop`, that
+calls the same `update.CheckLatest` function `runyx update` already
+used manually -- once on startup, then every 6h -- and caches the
+result so `GET /api/runyx/update` can serve it instantly (never
+triggering a live GitHub call from an HTTP request; that would block a
+page load on an external service). The web UI's new Settings "About"
+section reads this to show "Runyx vX is available" with a download
+link, instead of a user having to remember `runyx update` exists.
+
+**Deliberately does not touch the auto-apply gap.** `internal/update`
+already refuses to apply an update automatically because
+`PublicKeyHex` is empty -- no real release signing key exists yet (see
+the original self-update entry above) -- and that refusal stays
+exactly as strict as it was. This change only automates the
+*checking*, which carries none of the supply-chain risk actually
+downloading and replacing the running binary would: it's the same
+"is there something newer" question `runyx update` already asked, now
+asked on a schedule instead of only when a human remembers to run the
+command, with the human still the one who clicks "Download" and runs
+the installer themselves. Automating the actual download+apply step
+stays exactly as blocked as it always was, for exactly the same
+reason.
+
+`isNewerRelease` compares tags as plain strings (after normalizing a
+leading "v", since GitHub release tags conventionally have one and
+`version.Version` never does) rather than parsing semver -- neither
+side is guaranteed to be strict semver in this project (a local build
+is literally the string "dev"), so string comparison is honest about
+what this can actually promise: "this is a different release", not "a
+numerically greater one". `go test -race ./...` is green across the
+whole repo; `npm run check`/`build`/`test` are clean for the web
+change.

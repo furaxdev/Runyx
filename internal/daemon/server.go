@@ -19,9 +19,10 @@ func (d *Daemon) NewHTTPServer() *http.Server {
 	apiServer.History = d.History
 	apiServer.Register(mux)
 	extras := &api.RunyxExtras{
-		History:     d.History,
-		Transcriber: d.Transcriber,
-		Vision:      d.Vision,
+		History:       d.History,
+		Transcriber:   d.Transcriber,
+		Vision:        d.Vision,
+		UpdateChecker: d.UpdateChecker,
 	}
 	apiServer.RegisterRunyx(mux, extras)
 	apiServer.RegisterKnowledge(mux, extras)

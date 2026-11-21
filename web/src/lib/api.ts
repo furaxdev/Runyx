@@ -36,6 +36,15 @@ export interface ModelEntry {
   digest: string;
 }
 
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version?: string;
+  update_available: boolean;
+  download_url?: string;
+  checked_at: string;
+  error?: string;
+}
+
 export interface DeviceInfo {
   id: string;
   name: string;
@@ -139,6 +148,7 @@ export const api = {
     }),
   search: (q: string) => fetch(`/api/runyx/search?q=${encodeURIComponent(q)}`).then((r) => json<Message[]>(r)),
   dashboard: () => fetch("/api/runyx/dashboard").then((r) => json<DashboardStats>(r)),
+  checkUpdate: () => fetch("/api/runyx/update").then((r) => json<UpdateCheckResult>(r)),
   models: () => fetch("/v1/models").then((r) => json<{ data: { id: string }[] }>(r)),
   tags: () => fetch("/api/tags").then((r) => json<{ models: ModelEntry[] }>(r)),
   permissions: () => fetch("/api/runyx/permissions").then((r) => json<PermissionsSnapshot>(r)),

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/furaxdev/runyx/internal/history"
+	"github.com/furaxdev/runyx/internal/update"
 )
 
 func newTestMux(t *testing.T) (*http.ServeMux, *history.Store) {
@@ -210,5 +211,47 @@ func TestHistoryUnavailableReturns503(t *testing.T) {
 	rec := doJSON(t, mux, "GET", "/api/runyx/conversations", nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestUpdateCheckServesTheCheckersCachedResult(t *testing.T) {
+	checker := update.NewChecker("0.1.0")
+	checker.CheckFunc = func(_ *http.Client) (string, string, error) {
+		return "v0.2.0", "https://example.invalid/runyx-linux-amd64", nil
+	}
+	checker.CheckNow()
+
+	mux := http.NewServeMux()
+	s := &Server{}
+	s.RegisterRunyx(mux, &RunyxExtras{UpdateChecker: checker})
+
+	rec := doJSON(t, mux, "GET", "/api/runyx/update", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var res update.CheckResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res.CurrentVersion != "0.1.0" || res.LatestVersion != "v0.2.0" || !res.UpdateAvailable {
+		t.Errorf("unexpected result: %+v", res)
+	}
+}
+
+func TestUpdateCheckWithNoCheckerConfiguredReturnsZeroValue(t *testing.T) {
+	mux := http.NewServeMux()
+	s := &Server{}
+	s.RegisterRunyx(mux, &RunyxExtras{}) // no UpdateChecker
+
+	rec := doJSON(t, mux, "GET", "/api/runyx/update", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var res update.CheckResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res.UpdateAvailable {
+		t.Error("expected UpdateAvailable to be false with no checker configured, never a guess")
 	}
 }

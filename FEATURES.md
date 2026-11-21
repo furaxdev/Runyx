@@ -299,7 +299,15 @@ verify on real hardware.
       breakdown and `docs/MANUAL_TESTS.md`. No signing key is embedded
       yet (`internal/update.PublicKeyHex` is empty by design — see
       docs/DECISIONS.md) so `runyx update` reports the latest release
-      but refuses to auto-apply until a maintainer wires one up.
+      but refuses to auto-apply until a maintainer wires one up. The
+      daemon now also checks automatically: `internal/update.Checker`
+      runs the same check in the background every 6h (and once on
+      startup) alongside the existing idle-eviction loop, caches the
+      result, and serves it from `GET /api/runyx/update` so the web UI
+      (a new "About" section in Settings) can show "a newer version is
+      available" without the user ever running `runyx update`
+      themselves -- it still only ever checks and reports, same as the
+      manual command, never downloads or applies anything on its own.
 
 ## Infra (cross-cutting, started in M0)
 
