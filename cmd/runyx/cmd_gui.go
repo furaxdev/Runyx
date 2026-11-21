@@ -126,10 +126,27 @@ func ensureDaemonRunning(cfg config.Config, url string) (stop func(), err error)
 	done := make(chan error, 1)
 	go func() { done <- d.Serve(ctx) }()
 
-	if err := waitForDaemon(url, 10*time.Second); err != nil {
+	// Race the readiness poll against the daemon's own exit: if d.Serve
+	// fails outright (e.g. the listen address is already in use),
+	// waitForDaemon would otherwise just keep polling a daemon that will
+	// never answer for the full timeout, surfacing a generic "timed out"
+	// instead of the real, already-known cause.
+	ready := make(chan error, 1)
+	go func() { ready <- waitForDaemon(url, 10*time.Second) }()
+
+	select {
+	case err := <-ready:
+		if err != nil {
+			cancel()
+			<-done
+			return nil, fmt.Errorf("daemon did not become ready: %w", err)
+		}
+	case err := <-done:
 		cancel()
-		<-done
-		return nil, fmt.Errorf("daemon did not become ready: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("daemon exited before becoming ready: %w", err)
+		}
+		return nil, errors.New("daemon stopped before becoming ready")
 	}
 
 	stop = func() {

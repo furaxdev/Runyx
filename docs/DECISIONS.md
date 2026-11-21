@@ -1046,3 +1046,39 @@ is no component-level test harness in `web/` yet (only `api.test.ts`
 exists), so this is verified the same way the pre-existing
 drag-and-drop code was: build + typecheck clean, not an automated DOM
 paste-event test.
+
+## 2026-11-21 — Two real bugs in `cmd_gui.go`/`guiwindow`, found by review
+
+A code review of the `gui-window` branch surfaced two genuine
+correctness bugs in the native-window startup path, both fixed here:
+
+1. **The daemon could be torn down before the browser tab it was
+   serving even loaded.** `guiwindow.Open`'s own doc comment said the
+   default-browser fallback tier "returns immediately" with "nothing to
+   block on" -- true for `openDefaultBrowser` itself, but `cmdGUI` calls
+   `defer stopDaemon()` right after `Open` returns, so on any machine
+   that falls all the way through to that tier (no cgo/native webview
+   build, no Edge/Chrome/Chromium for app-mode), the daemon's context
+   was cancelled and shut down within microseconds of the OS being
+   asked to open a tab -- before that tab could possibly finish
+   loading. Fixed by having `Open` itself block on SIGINT/SIGTERM after
+   the default-browser tier succeeds (the same pattern `runyx serve`
+   already uses via `signal.NotifyContext`), so the daemon now lives
+   exactly as long as "open this URL and keep serving it" requires,
+   with no change to the native/app-mode tiers (which already block
+   correctly on window/process close).
+2. **A daemon startup failure was silently replaced with a generic 10s
+   timeout.** `ensureDaemonRunning` started `d.Serve(ctx)` in a
+   goroutine and only read its result (on the buffered `done` channel)
+   *after* `waitForDaemon` gave up -- so if `net.Listen` failed
+   immediately (e.g. the configured port is already bound by something
+   else), the real error sat unread on `done` while the readiness
+   poller spent the full 10 seconds hitting a daemon that would never
+   answer, then reported "timed out waiting for daemon to become
+   ready" instead of the actual cause. Fixed by racing the readiness
+   poll against `done` with a `select`, so a daemon that exits before
+   becoming ready is reported immediately with its real error.
+   `TestEnsureDaemonRunningFailsFastWhenPortInUse` (binds the port
+   first, then asserts `ensureDaemonRunning` returns in well under the
+   10s timeout) guards the fix; `go test -race ./...` is green across
+   the whole repo.

@@ -10,11 +10,14 @@
 package guiwindow
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 )
 
 // ErrNoNativeWindow is returned by the build-tag-selected openNative
@@ -26,10 +29,15 @@ var ErrNoNativeWindow = errors.New("native window not available")
 // Open shows url in an app-style window titled title, trying the
 // native embedded webview first, then browser app-mode, then the OS
 // default browser. It blocks until the window is closed for the
-// native and app-mode tiers (so a caller can stop a daemon it started
-// once the user is done); for the default-browser tier there is
-// nothing to block on, since a bare "open this URL" OS command returns
-// immediately and gives no way to detect when the user closes the tab.
+// native and app-mode tiers, so a caller can stop a daemon it started
+// once the user is done. The default-browser tier has no such signal
+// to block on -- a bare "open this URL" OS command returns immediately
+// and gives no way to detect when the user closes the tab -- so Open
+// instead blocks there until the process receives SIGINT/SIGTERM, the
+// same way `runyx serve` blocks: a caller that tears down its daemon
+// via defer right after Open returns (as cmdGUI does) must never see
+// Open return while that daemon is still the only thing serving the
+// tab it just opened.
 func Open(url, title string) error {
 	// Whether openNative failed because this build has no native
 	// support at all (ErrNoNativeWindow) or because it tried and the
@@ -43,7 +51,18 @@ func Open(url, title string) error {
 		return nil
 	}
 
-	return openDefaultBrowser(url)
+	if err := openDefaultBrowser(url); err != nil {
+		return err
+	}
+	waitForInterrupt()
+	return nil
+}
+
+// waitForInterrupt blocks until the process is asked to stop.
+func waitForInterrupt() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
 }
 
 // appModeCandidates returns the browser binaries to try for app mode,
@@ -107,8 +126,9 @@ var errNoBrowserFound = errors.New("no installed browser found for app mode")
 // opens a normal, full browser window (tabs, address bar) -- there is
 // no app-mode equivalent for "whatever the user's default is" -- and,
 // unlike the two tiers above, the launching command returns
-// immediately once the browser has been asked to open the URL, so
-// there is nothing to block on here.
+// immediately once the browser has been asked to open the URL. Open
+// itself is what blocks afterward (see waitForInterrupt) -- this
+// function only fires off the OS command.
 func openDefaultBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {

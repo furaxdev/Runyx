@@ -1,11 +1,15 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/furaxdev/runyx/internal/config"
 )
 
 // TestAcquireSingleInstanceFirstCallerWins guards the common case: no
@@ -82,5 +86,40 @@ func TestDaemonReachableTrueForRealServer(t *testing.T) {
 func TestDaemonReachableFalseWhenNothingListens(t *testing.T) {
 	if daemonReachable("127.0.0.1:1") {
 		t.Error("expected daemonReachable to be false when nothing listens on the port")
+	}
+}
+
+// TestEnsureDaemonRunningFailsFastWhenPortInUse guards against
+// ensureDaemonRunning silently discarding a real startup error (e.g.
+// the listen address already being bound by something else) and
+// instead burning the full 10s readiness timeout before reporting a
+// generic "timed out" -- it must return promptly with the real cause.
+func TestEnsureDaemonRunningFailsFastWhenPortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	dir := t.TempDir()
+	cfg := config.Config{
+		ListenAddr:  addr,
+		ModelsDir:   filepath.Join(dir, "models"),
+		BackendsDir: filepath.Join(dir, "backends"),
+		DataDir:     filepath.Join(dir, "data"),
+	}
+
+	start := time.Now()
+	stop, err := ensureDaemonRunning(cfg, "http://"+addr)
+	elapsed := time.Since(start)
+	if err == nil {
+		if stop != nil {
+			stop()
+		}
+		t.Fatal("expected an error when the listen address is already bound")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("ensureDaemonRunning took %s to fail -- looks like it waited out the full readiness timeout instead of catching the daemon's own startup error", elapsed)
 	}
 }
