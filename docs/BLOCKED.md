@@ -36,6 +36,20 @@ extracting a real downloaded archive, rather than guessing from
 documentation. `internal/colibri`'s Fetcher, PickAsset, and
 ServeCommand/ImportCommand are built against those verified facts.
 
+**`colibri.Fetcher.Ensure` itself was then actually run against live
+GitHub, and hit the same wall as the two fetchers above**: this
+session's proxy serves anonymous `git clone` and direct
+`github.com/.../releases/download/...` asset downloads fine (both of
+which is how the verification above was done), but `api.github.com`
+calls for an unattached repository are refused outright ("GitHub
+access to this repository is not enabled for this session") — the
+exact call `Ensure` makes first, to resolve "latest" into real asset
+URLs. So `Ensure`'s release-resolution step is confirmed blocked here
+the same way `internal/backend.Fetcher`'s and `internal/voice.Fetcher`'s
+are, even though colibri's own repository content was reachable by
+other means. A real user's machine has ordinary `api.github.com`
+access and isn't affected by this.
+
 **Still not exercised, and honestly can't be from here**: no real GGUF
 file (of any size) was available in this sandbox, so `coli import` was
 only ever run against a deliberately invalid file (confirming its real
