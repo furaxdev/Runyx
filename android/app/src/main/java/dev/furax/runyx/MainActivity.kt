@@ -5,16 +5,18 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.fillMaxSize
 
 /**
  * Entry point. Routes between pairing (item 26) and chat (items 25, 27)
@@ -32,7 +34,7 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
 
         setContent {
-            MaterialTheme {
+            RunyxTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     RunyxApp(viewModel, sharedText)
                 }
@@ -55,9 +57,19 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RunyxApp(viewModel: RunyxViewModel, sharedText: String?) {
     val paired = viewModel.paired
-    if (paired == null) {
-        PairingScreen(viewModel)
-    } else {
-        ChatScreen(viewModel, sharedText)
+    // Crossfade between pairing and chat instead of an abrupt cut, using
+    // the same fluid easing as the web app's transitions.
+    AnimatedContent(
+        targetState = paired != null,
+        transitionSpec = {
+            fadeIn(tween(240, easing = RunyxEasing)) togetherWith fadeOut(tween(160, easing = RunyxEasing))
+        },
+        label = "pairing-to-chat",
+    ) { isPaired ->
+        if (!isPaired) {
+            PairingScreen(viewModel)
+        } else {
+            ChatScreen(viewModel, sharedText)
+        }
     }
 }

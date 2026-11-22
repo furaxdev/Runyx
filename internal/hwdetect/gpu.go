@@ -1,11 +1,26 @@
 package hwdetect
 
 import (
+	"context"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// gpuProbeTimeout bounds every GPU-vendor-tool subprocess call below
+// (nvidia-smi, rocm-smi, sysctl). A real, responding tool answers in
+// well under a second; this exists so a stalled driver or a tool that
+// hangs instead of erroring out can never block Detect() -- and
+// therefore daemon.New(), and therefore the whole daemon/GUI startup
+// path -- for an unbounded amount of time. Found the hard way: a CI
+// runner where nvidia-smi exists but doesn't return made
+// TestEnsureDaemonRunningFailsFastWhenPortInUse take 30+ seconds
+// instead of failing fast, since daemon.New() (called before that
+// test's own race-the-readiness-poll logic even starts) was the thing
+// actually stuck.
+const gpuProbeTimeout = 3 * time.Second
 
 // detectGPUs probes for GPUs using whatever vendor tooling is present on
 // PATH. This is best-effort: on a machine with no GPU, or none of these
@@ -21,7 +36,9 @@ func detectGPUs() []GPU {
 }
 
 func detectNVIDIA() []GPU {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gpuProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		return nil
 	}
@@ -42,7 +59,9 @@ func detectNVIDIA() []GPU {
 }
 
 func detectAMD() []GPU {
-	out, err := exec.Command("rocm-smi", "--showproductname", "--showmeminfo", "vram", "--csv").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gpuProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "rocm-smi", "--showproductname", "--showmeminfo", "vram", "--csv").Output()
 	if err != nil {
 		return nil
 	}
@@ -55,7 +74,9 @@ func detectAMD() []GPU {
 }
 
 func detectAppleSilicon() []GPU {
-	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gpuProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sysctl", "-n", "hw.memsize").Output()
 	if err != nil {
 		return nil
 	}

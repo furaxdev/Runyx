@@ -20,6 +20,9 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	if cfg.Telemetry {
 		t.Error("Telemetry must default to false")
 	}
+	if cfg.GPUSaverEnabled {
+		t.Error("GPUSaverEnabled must default to false")
+	}
 
 	path, err := Path()
 	if err != nil {
@@ -31,6 +34,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 
 	cfg.Telemetry = true // should be forced back to false on next Load
 	cfg.VRAMBudgetMB = 4096
+	cfg.GPUSaverEnabled = true
 	if err := Save(cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -44,6 +48,9 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	}
 	if reloaded.VRAMBudgetMB != 4096 {
 		t.Errorf("VRAMBudgetMB = %d, want 4096", reloaded.VRAMBudgetMB)
+	}
+	if !reloaded.GPUSaverEnabled {
+		t.Error("GPUSaverEnabled = false after Save(true), want it to round-trip")
 	}
 }
 

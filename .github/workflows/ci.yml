@@ -53,8 +53,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - goos: windows
-            goarch: amd64
+          # windows/amd64 is intentionally not in this CGO_ENABLED=0
+          # matrix: it needs the real GUI build (cgo + mingw-w64 + the
+          # bundled WebView2 headers), built separately below.
           - goos: darwin
             goarch: amd64
           - goos: darwin
@@ -73,6 +74,203 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -o /tmp/runyx-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/runyx
+
+  windows-release:
+    # Builds the real Windows deliverable: Runyx.exe with the native
+    # WebView2 app window compiled in (cgo + mingw-w64, since this runs
+    # on an ubuntu-latest runner rather than on Windows itself), the
+    # mascot icon embedded, and no console window on double-click (see
+    # scripts/package/windows-release.sh for the details, including the
+    # EventToken.h case-mismatch shim mingw-w64 needs for the bundled
+    # WebView2.h to compile at all). windows/arm64 is not built here:
+    # Ubuntu's mingw-w64 packages only cross-compile to x86_64.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install mingw-w64 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+      - name: Build and package Runyx.exe
+        run: sh scripts/package/windows-release.sh "ci-${{ github.sha }}" /tmp/windows-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-windows-amd64
+          path: |
+            /tmp/windows-release/runyx-windows-amd64.zip
+            /tmp/windows-release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  windows-installer:
+    # The real, double-click, click-through-a-wizard Windows installer
+    # (scripts/package/runyx.iss, Inno Setup), built and compiled for
+    # real on a native Windows runner -- unlike windows-release above
+    # (which cross-compiles Runyx.exe itself from Linux via mingw-w64,
+    # already proven in CI), there's no practical way to run Inno
+    # Setup's compiler anywhere but Windows (or Wine, not attempted).
+    # This job builds Runyx.exe natively here too, rather than
+    # downloading windows-release's artifact, so it's a self-contained
+    # proof that the whole chain -- native cgo build, WebView2 window,
+    # icon, installer -- works start to finish on real Windows.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install mingw-w64 (cgo needs a real C/C++ compiler) and Inno Setup
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          choco install innosetup --no-progress -y
+      - name: Build Runyx.exe natively
+        run: |
+          set -eu
+          # No EventToken.h shim needed here, unlike windows-release.sh's
+          # Linux-hosted cross-compile: that shim relies on
+          # "EventToken.h" and "eventtoken.h" being two different files,
+          # true on a case-sensitive filesystem (ext4) but not on
+          # Windows' NTFS, which is case-preserving but case-INSENSITIVE
+          # -- the two names resolve to the very same file there. The
+          # first attempt at this job created the shim anyway and hit
+          # infinite self-inclusion recursion (the shim's own
+          # "#include eventtoken.h" resolved right back to itself).
+          # mingw-w64's real eventtoken.h already satisfies
+          # WebView2.h's "EventToken.h" include directly on Windows.
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERSION="ci-${{ github.sha }}"
+          export CGO_ENABLED=1
+          go build -ldflags "-H=windowsgui -X github.com/furaxdev/runyx/internal/version.Version=$VERSION -X github.com/furaxdev/runyx/internal/version.Commit=$COMMIT -X github.com/furaxdev/runyx/internal/version.BuildDate=$BUILD_DATE" \
+            -o scripts/package/Runyx.exe ./cmd/runyx
+      - name: Compile the installer with Inno Setup
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.0.0-ci /DSourceExe=Runyx.exe scripts\package\runyx.iss
+      - name: Smoke-test the installer silently, confirm it actually installs and configures
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem scripts\package\Output\*.exe | Select-Object -First 1
+          # /TASKS selects every configuration checkbox the wizard
+          # offers, so this proves the config steps actually do what
+          # their descriptions say, not just that Runyx.exe got copied.
+          Start-Process -FilePath $installer.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon,startupicon,addtopath" -Wait
+          $installed = "$env:LOCALAPPDATA\Programs\Runyx\Runyx.exe"
+          if (-not (Test-Path $installed)) { throw "Runyx.exe not found after silent install at $installed" }
+          & $installed version
+
+          $desktopShortcut = "$env:USERPROFILE\Desktop\Runyx.lnk"
+          if (-not (Test-Path $desktopShortcut)) { throw "desktop shortcut not created despite /TASKS=desktopicon" }
+          $startupShortcut = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Runyx.lnk"
+          if (-not (Test-Path $startupShortcut)) { throw "startup shortcut not created despite /TASKS=startupicon" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -notlike "*Programs\Runyx*") { throw "install dir not added to user PATH despite /TASKS=addtopath" }
+
+          $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\Runyx\unins*.exe" | Select-Object -First 1
+          Start-Process -FilePath $uninstaller.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          if (Test-Path $installed) { throw "Runyx.exe still present after silent uninstall" }
+          if (Test-Path $desktopShortcut) { throw "desktop shortcut still present after uninstall" }
+          if (Test-Path $startupShortcut) { throw "startup shortcut still present after uninstall" }
+          $userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPathAfter -like "*Programs\Runyx*") { throw "install dir still in user PATH after uninstall" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-windows-installer
+          path: scripts/package/Output/*.exe
+          if-no-files-found: error
+
+  linux-release:
+    # Builds the real Linux desktop deliverable: a `runyx` binary with
+    # the native WebKitGTK app window compiled in (cgo; no cross
+    # compiler needed, ubuntu-latest *is* linux/amd64), a .desktop
+    # entry + icon set so it shows up as a real application, and both
+    # a .deb and an Arch Linux package via nfpm. linux/arm64 isn't
+    # built here -- that would need an arm64 GTK/WebKit2GTK sysroot,
+    # a much bigger lift than mingw-w64 was for Windows; the plain
+    # CGO_ENABLED=0 CLI-only linux/arm64 build above is unaffected.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install GTK3/WebKit2GTK dev headers and nfpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build and package (.deb, Arch Linux, tarball)
+        run: sh scripts/package/linux-release.sh "ci-${{ github.sha }}" /tmp/linux-release
+      - name: Install and smoke-test the built .deb on this runner
+        run: |
+          set -eu
+          sudo dpkg -i /tmp/linux-release/*.deb | tee /tmp/dpkg-install.log
+          grep -q "Runyx is installed" /tmp/dpkg-install.log
+          runyx version
+          test -f /usr/share/applications/runyx.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/runyx.png
+          sudo dpkg -r runyx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-linux-amd64
+          path: |
+            /tmp/linux-release/*.deb
+            /tmp/linux-release/*.pkg.tar.zst
+            /tmp/linux-release/runyx-linux-amd64.tar.gz
+            /tmp/linux-release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  darwin-release:
+    # Builds the real macOS deliverable on an actual macOS runner (no
+    # cross-compile trickery needed, or possible, for a cgo + Cocoa/
+    # WebKit build): a genuine Runyx.app bundle with the native window
+    # compiled in and a real .icns generated from the mascot icon via
+    # the standard sips/iconutil toolchain. GOARCH set to amd64/arm64
+    # would still need the other arch's clang target, which cgo
+    # cross-arch builds don't handle for free the way plain Go
+    # cross-compilation does, so this needs a runner of the matching
+    # architecture, not a matrix entry.
+    #
+    # Intel (macos-13, amd64) isn't built here: that runner sat queued
+    # for 24h with zero progress on a real run of this job and was
+    # then cancelled by GitHub -- not a flake, a capacity/availability
+    # problem with that runner pool on this account, confirmed by a
+    # second run hitting the exact same stall. Re-adding an Intel leg
+    # needs a runner label actually available here, which hasn't been
+    # verified; see docs/DECISIONS.md.
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and package Runyx.app + installer .pkg
+        run: sh scripts/package/macos-release.sh "ci-${{ github.sha }}" /tmp/darwin-release
+      - name: Smoke-test the .pkg installer, confirm it actually installs
+        run: |
+          set -eu
+          pkg="$(ls /tmp/darwin-release/*.pkg)"
+          sudo installer -pkg "$pkg" -target /
+          test -d /Applications/Runyx.app
+          /Applications/Runyx.app/Contents/MacOS/Runyx version
+          sudo rm -rf /Applications/Runyx.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-darwin-arm64
+          path: |
+            /tmp/darwin-release/runyx-darwin-arm64.zip
+            /tmp/darwin-release/*.pkg
+            /tmp/darwin-release/SHA256SUMS.txt
+          if-no-files-found: error
 
   web:
     runs-on: ubuntu-latest
@@ -137,3 +335,8 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug testDebugUnitTest --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runyx-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

@@ -86,6 +86,24 @@ verify on real hardware.
       connection is plain HTTP, restricted in code to private LAN
       ranges and `.local` names (Android's `network_security_config.xml`
       can't express that restriction by subnet).
+- [x] GPU Saver / CPU Saver (not in the original numbered spec) — large
+      MoE models that don't comfortably fit in RAM+VRAM can be served
+      via [colibri](https://github.com/JustVugg/colibri) instead of
+      llama-server, streaming unused experts from disk. Off by default
+      (`gpu_saver_enabled` in config.toml); never fetched or run
+      automatically — `runyx gpu-saver import <model>` is the one
+      explicit, visible step that both fetches colibri and converts a
+      model for it. `internal/colibri`'s Fetcher is unit tested against
+      a fake release server (same "tested selection logic, not
+      exercised against the real network in this sandbox" caveat as
+      llama.cpp/whisper.cpp — see docs/BLOCKED.md); its asset naming
+      and archive layout (a flat `coli` Python launcher beside native
+      engine binaries and shaders) were verified against a real
+      download of colibri v2.1.0's Linux release, not guessed from
+      documentation. The "is this worth it" recommendation
+      (`colibri.Recommended`) matches known MoE family names, not real
+      GGUF architecture metadata Runyx doesn't parse yet — an honest
+      heuristic, not a guarantee; see docs/DECISIONS.md.
 
 ## M2 — Chat & UI
 
@@ -98,8 +116,9 @@ verify on real hardware.
       reportlab); audio/video transcription plumbing tested against a
       fake whisper-cli binary + real ffmpeg; chunking for oversized
       content is implemented, actual RAG-based retrieval of chunks lands
-      with item 16 (M3). Drag-and-drop/paste in the UI not implemented —
-      file picker only.
+      with item 16 (M3). File picker, drag-and-drop, and clipboard paste
+      (a pasted screenshot or copied file, not just plain text) are all
+      wired in the Composer to the same upload pipeline.
 - [x] 29. UI identity — Svelte UI built and actually served by the daemon
       (verified live: `curl localhost:11535/` returns the built page);
       collapsible sidebar (Chat/Models/Agent tabs, recents grouped by
@@ -298,7 +317,15 @@ verify on real hardware.
       breakdown and `docs/MANUAL_TESTS.md`. No signing key is embedded
       yet (`internal/update.PublicKeyHex` is empty by design — see
       docs/DECISIONS.md) so `runyx update` reports the latest release
-      but refuses to auto-apply until a maintainer wires one up.
+      but refuses to auto-apply until a maintainer wires one up. The
+      daemon now also checks automatically: `internal/update.Checker`
+      runs the same check in the background every 6h (and once on
+      startup) alongside the existing idle-eviction loop, caches the
+      result, and serves it from `GET /api/runyx/update` so the web UI
+      (a new "About" section in Settings) can show "a newer version is
+      available" without the user ever running `runyx update`
+      themselves -- it still only ever checks and reports, same as the
+      manual command, never downloads or applies anything on its own.
 
 ## Infra (cross-cutting, started in M0)
 

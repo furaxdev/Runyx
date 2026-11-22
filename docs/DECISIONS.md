@@ -639,3 +639,702 @@ for free once built, nothing extra needed there).
     `internal/agent/policy_test.go` and the new cases in
     `internal/agent/agent_test.go`, `internal/backend/fetch_test.go`,
     and `internal/convert/convert_test.go`.
+
+## 2026-10-25 — Runyx as a real Windows app: native window, not a browser tab
+
+Reported as a bug (v0.1.0, Windows): `runyx.exe` with no arguments
+tried to exec a sibling `runyx-tui.exe` that the release zip never
+included; `runyx.exe serve` only started the headless daemon and left
+the user to open a browser themselves. Neither is "a real Windows
+application" -- fixed by making a bare `runyx` (double-clicked or run
+with no arguments, on every OS, not just Windows) open an app-style
+window instead of the TUI, with `runyx tui` still available explicitly
+and `runyx serve` unchanged for the headless/server case.
+
+- **`internal/guiwindow`**: shows the daemon's URL in a window via
+  three tiers, each a worse experience than the one before it but
+  needing nothing the user has to install: (1) a true embedded native
+  webview (WebView2 on Windows via `github.com/webview/webview_go`,
+  WebKitGTK/Cocoa on Linux/macOS), (2) an installed browser's
+  `--app=url` mode (no tabs, no address bar, but a real browser
+  process), (3) the OS default browser. Tier selection is build-tag
+  driven, not a runtime feature flag:
+  - `native_cgo_windows.go` (`cgo && windows`): always compiled into
+    the Windows build (cgo is mandatory there specifically for this).
+    Before ever calling into the C++ webview library, checks the
+    WebView2 Evergreen Runtime's own registry marker
+    (`...\EdgeUpdate\Clients\{F3017226-...}`'s `pv` value, the same
+    check Microsoft's own guidance uses) and falls through to tier 2 if
+    it's absent, rather than risking a crash deep in WebView2's native
+    init code that Go's `recover()` cannot catch if it aborts the
+    process instead of raising a catchable exception.
+  - `native_other_guinative.go` (`cgo && !windows && guinative`): the
+    Linux/macOS equivalent, gated behind an explicit `-tags guinative`
+    opt-in on top of cgo, not "compiles whenever cgo happens to be
+    on". That distinction matters because `go test -race ./...`
+    enables cgo for the race detector on every platform, including
+    this project's own `ubuntu-latest` CI runner, which doesn't have
+    `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` installed -- without the
+    opt-in tag, this package must not make that otherwise-unrelated
+    `-race` run suddenly require them.
+  - `native_other_stub.go` (`cgo && !windows && !guinative`) and
+    `native_stub.go` (`!cgo`): both just return `ErrNoNativeWindow`,
+    letting `Open` fall through to tiers 2/3. Verified in this sandbox:
+    installed `libgtk-3-dev` + `libwebkit2gtk-4.1-dev` (Ubuntu 24.04
+    only ships the `4.1`-suffixed package; webview_go's bundled cgo
+    directives ask for `webkit2gtk-4.0` by name, so a local
+    `webkit2gtk-4.0.pc` pkg-config alias was needed to prove
+    `-tags guinative` actually compiles against real GTK/WebKit2GTK --
+    not committed to the repo, since it's a dev-environment-only
+    naming workaround, not something Runyx ships) and confirmed
+    `go build ./internal/guiwindow/...` succeeds; confirmed
+    `CGO_ENABLED=1 go build ./...` with *no* guinative tag and *no*
+    pkg-config shim also succeeds (the actual CI configuration), and
+    that `go test -race ./...` passes end to end.
+- **Windows cross-compile from Linux**: installed
+  `gcc-mingw-w64-x86-64`/`g++-mingw-w64-x86-64` and proved a full
+  `GOOS=windows GOARCH=amd64 CGO_ENABLED=1` build of `./cmd/runyx`
+  succeeds, producing a real PE32+ binary. One real obstacle:
+  webview_go's bundled `WebView2.h` `#include`s `"EventToken.h"`
+  (capital letters), but mingw-w64's own bundled Windows SDK headers
+  spell the file `eventtoken.h` -- a hard failure on this
+  case-sensitive filesystem. Fixed with a one-line shim header
+  (`EventToken.h` that just `#include`s `eventtoken.h`) added first on
+  the include path via `CGO_CFLAGS`/`CGO_CXXFLAGS`; see
+  `scripts/package/windows-release.sh`, which does this and is what
+  `.github/workflows/ci.yml`'s new `windows-release` job calls.
+  windows/arm64 is not attempted: Ubuntu's mingw-w64 packages only
+  cross-compile to x86_64, not aarch64.
+- **No console flash on double-click, but CLI output still works from
+  a terminal**: built with `-ldflags -H=windowsgui` (no console
+  subsystem), which also means a GUI-subsystem process starts with
+  *no* stdio handles at all -- not just a hidden console, none --
+  which would otherwise make `runyx.exe doctor`/`serve`/etc. silently
+  produce no visible output when run from an existing PowerShell/cmd
+  window. `cmd/runyx/console_windows.go` calls `AttachConsole
+  (ATTACH_PARENT_PROCESS)` as the very first thing `main()` does and
+  reopens `os.Stdout`/`os.Stderr`/`os.Stdin` against `CONOUT$`/`CONIN$`
+  when it succeeds; when there's no parent console (the double-click
+  case), `AttachConsole` just fails and this is a no-op, which is
+  exactly the point. `console_other.go` is the (empty) non-Windows
+  stub -- this is a Windows-subsystem-specific problem, nothing else
+  needs it.
+- **Single instance + daemon reuse** (`cmd/runyx/cmd_gui.go`):
+  `acquireSingleInstance` wins outright via an atomically-created lock
+  file (`O_CREATE|O_EXCL` is race-free across processes at the OS
+  level, so no platform-specific PID-liveness syscalls are needed); if
+  the lock file already exists, it checks whether a daemon actually
+  answers at the configured address before deciding what that means --
+  reachable means a real instance (this GUI or even a plain
+  `runyx serve`) is genuinely running, so this process backs off;
+  unreachable means the lock is stale (left behind by a crash, not a
+  clean shutdown that would have removed it), so it's cleaned up and
+  retried once. `ensureDaemonRunning` reuses an already-reachable
+  daemon instead of starting a second one, and only the window that
+  actually started its own daemon stops it when the window closes.
+- **Taskbar icon**: `assets/mascot/svg/runyx-mascot-idle-dark.svg`
+  rasterized at 16/32/48/256px (`rsvg-convert` via ImageMagick's
+  `convert`, after installing `librsvg2-bin` -- plain ImageMagick alone
+  has no SVG rasterizer of its own) and combined into
+  `cmd/runyx/runyx.ico` (checked with `wrestool -l` after building:
+  all 4 sizes present as `RT_ICON` plus one `RT_GROUP_ICON`), embedded
+  via `cmd/runyx/icon_windows.rc` + `x86_64-w64-mingw32-windres` ->
+  `cmd/runyx/icon_windows.syso`, which Go links in automatically for
+  windows builds by filename convention (`name_windows.syso`) with no
+  extra build flag needed, and which a plain Linux/macOS build simply
+  never sees.
+- **Offline by default**: `internal/webui/dist` (the built web UI) was
+  grepped for external `http(s)://` references -- the only hit is an
+  XML namespace URI string (`http://www.w3.org/2000/svg`) inside an
+  SVG, not a network fetch. No new network call was introduced by any
+  of the above; `cmdGUI`'s daemon-start path reuses `cmdServe`'s
+  existing backend-resolution logic unchanged (already tolerant of no
+  network -- see `resolveBackendBinary`'s doc comment from M1).
+  Verifying this holds on a real offline Windows machine, after a
+  model has actually been downloaded, needs a human with that machine
+  -- see `docs/MANUAL_TESTS.md`'s new "Windows desktop app" section,
+  item 24 specifically, which is the full airplane-mode flight test.
+- **Installer**: `scripts/package/runyx.iss` is a real Inno Setup
+  script (Start Menu entry, optional desktop shortcut, no admin rights
+  required since Runyx is portable-by-default) but was never compiled
+  -- no Windows, no Wine, no `iscc` in this sandbox. See
+  `scripts/package/README.md`.
+- **Not done here**: actually running any of this on Windows. Every
+  claim above that says "proved"/"confirmed" is about what compiles
+  and what the unit tests cover; the interactive, real-WebView2,
+  real-offline experience needs a human on real Windows hardware --
+  `docs/MANUAL_TESTS.md` items 18-25 are exactly that checklist, in
+  the order a reviewer should work through them.
+
+## 2026-10-25 — Same treatment for Linux (Debian/Arch) and macOS
+
+Follow-up to the Windows desktop app work above: "do the same for
+every other system." `internal/guiwindow`'s three-tier window
+strategy and `cmd/runyx/cmd_gui.go`'s single-instance/daemon-reuse
+logic were already fully cross-platform (no OS-specific code there at
+all) -- what Linux and macOS were missing was the *native build being
+the one that actually ships*, a real package/bundle, an icon
+integrated into the desktop environment, and CI that proves it,
+exactly like `windows-release` proves the Windows side.
+
+- **Linux is the one verified beyond "it compiles" in this session,
+  not just scripted**: `scripts/package/linux-release.sh` builds
+  `runyx` with `-tags guinative` (the native WebKitGTK window, gated
+  behind that explicit tag precisely so `go test -race ./...` keeps
+  passing without GTK/WebKit dev packages installed -- see the
+  Windows entry above for why that tag exists), assembles a
+  `.desktop` entry (`assets/linux/runyx.desktop`) and a 16/32/48/256px
+  icon set (`assets/linux/icons/`, rasterized from the same mascot SVG
+  the Windows `.ico` came from), and packages all of it with `nfpm`
+  (`go install`ed fresh in this sandbox) into a real `.deb`, a real
+  Arch Linux `.pkg.tar.zst`, and a plain tarball.
+  - **Actually installed and run, not just built**: `dpkg -i`'d the
+    built `.deb` on this Debian-based sandbox, confirmed `runyx
+    version` ran from `/usr/bin/runyx` and the desktop file/icons
+    landed under `/usr/share/`, then ran `runyx` for real under
+    `xvfb-run` (a virtual X display -- this sandbox has no real one).
+    The GTK/WebKit process started and stayed up (not a crash loop),
+    printed the expected `libEGL`/DRI3 warnings for a GPU-less sandbox
+    (harmless -- WebKit falls back to software rendering) and nothing
+    worse, and its embedded daemon answered a real
+    `GET /api/tags` -> 200 on `127.0.0.1:11535`. Launched a second
+    `runyx` while the first was still running and confirmed it printed
+    "Runyx is already running" and exited instead of opening a
+    duplicate -- the single-instance logic working against a real
+    concurrent process, not just the unit tests' synthetic lock-file
+    scenarios. `dpkg -r`'d it afterward to leave the sandbox clean.
+    `.github/workflows/ci.yml`'s new `linux-release` job repeats the
+    build-install-smoke-test-uninstall sequence on every push, on a
+    fresh `ubuntu-latest` runner.
+  - Same `EventToken.h`-style naming problem as Windows, different
+    header: current Ubuntu/Debian/Arch all ship `webkit2gtk-4.1`, not
+    the `webkit2gtk-4.0` name `webview_go`'s bundled cgo directives
+    ask for by exact string. Worked around the same way -- a one-line
+    pkg-config alias generated at build time (`sed` on the real
+    `.pc` file), not a patch to the vendored dependency.
+  - `nfpm.yaml` needed `expand: true` on every `contents[]` entry for
+    its `${NFPM_PKGROOT}`/`${NFPM_VERSION}` env-var references to
+    actually substitute -- found by nfpm failing with a literal
+    "`Glob failed: ${NFPM_PKGROOT}/usr/bin/runyx: no matching files`"
+    until that was added; without it, nfpm silently treats `${...}` as
+    a literal path component.
+  - The Arch package was inspected (`.PKGINFO`, file layout, both
+    correct) but not installed -- no `pacman` on this Debian-based
+    sandbox. `scripts/package/PKGBUILD` (a from-source AUR build, as
+    opposed to nfpm's prebuilt binary package) was updated to match --
+    same `-tags guinative` build, same pkg-config shim, installs the
+    same desktop file/icons -- but `makepkg` itself was never run.
+- **macOS: real CI on real Apple hardware, nothing locally.** A cgo
+  build targeting Cocoa/WebKit cannot be cross-compiled from Linux the
+  way Windows' mingw-w64 handled cgo-targeting-Windows -- there is no
+  equivalent lightweight cross toolchain, and standing up osxcross
+  (unofficial, needs an extracted Apple SDK, licensing-gray, fragile)
+  was not attempted as disproportionate to what it would buy here.
+  Instead, `.github/workflows/ci.yml` gained a `darwin-release` job
+  that runs `scripts/package/macos-release.sh` directly on two of
+  GitHub's own macOS runners (`macos-13`, Intel; `macos-14`, Apple
+  Silicon) -- genuine macOS building the genuine Cocoa/WebKit backend
+  natively, no cross-compilation involved at all, which is actually
+  *stronger* verification than this sandbox could ever produce itself
+  even with a hypothetical working osxcross setup. The script produces
+  a real `Runyx.app` bundle: `Contents/MacOS/Runyx` (the binary, built
+  with `-tags guinative` same as Linux), a real `Runyx.icns` generated
+  the standard way (`sips` to resize `assets/mac/icon-1024.png` into
+  an `.iconset`, `iconutil -c icns`), and an `Info.plist` with the
+  bundle id/version/icon wired up. Not run here at all -- this is
+  100% unverified by this sandbox, verified only by the CI job itself
+  running on GitHub's infrastructure.
+- **Icon sources**: `assets/linux/icons/*.png` and
+  `assets/mac/icon-1024.png` are both rasterized (via `rsvg-convert`,
+  already installed for the Windows `.ico` earlier) from the exact
+  same `runyx-mascot-idle-dark.svg` the Windows icon came from, so all
+  three platforms show the same mascot, not three different ad hoc
+  renders.
+- **Not done here**: Homebrew (`runyx.rb`), `.rpm` (same `nfpm.yaml`
+  as the verified `.deb`/Arch targets, likely to work, not tried),
+  AppImage, Docker, winget -- unchanged from before this entry, still
+  tracked honestly in `scripts/package/README.md`'s status table.
+  `docs/MANUAL_TESTS.md` items 26-33 are the human checklist for
+  everything this sandbox genuinely could not verify (real window
+  rendering outside Xvfb, Arch `pacman -U`, every macOS item, the
+  per-OS offline flight-tests).
+
+## 2026-10-25 — Real installers for Windows and macOS (not just zips)
+
+Follow-up: "make a Runyx(version)Installer.exe that installs and sets
+up Runyx, same for macOS." Both platforms already had a real app
+(`Runyx.exe`, `Runyx.app`); what was missing was the actual
+double-click-and-it's-installed experience, built and genuinely
+verified rather than just a script nobody had run.
+
+- **Windows (`scripts/package/runyx.iss`, Inno Setup)**: rather than
+  trying to get Inno Setup's compiler running under Wine on this
+  Linux sandbox (fragile, and the mingw-w64 cross-compile path already
+  proved `Runyx.exe` itself builds correctly), `.github/workflows/
+  ci.yml` gained a `windows-installer` job on `runs-on: windows-latest`
+  -- a genuine, native Windows machine via GitHub's own runners, the
+  same reasoning as `darwin-release`'s macOS runners. It installs
+  mingw-w64 and Inno Setup via Chocolatey, builds `Runyx.exe` natively
+  (hitting the exact same `EventToken.h` lowercase-vs-uppercase
+  mismatch the Linux cross-compile does, since Chocolatey's `mingw`
+  package bundles the same upstream mingw-w64 SDK headers -- same
+  shim), compiles `runyx.iss` with `ISCC.exe` into
+  `Runyx-<version>-Installer.exe`, and then **actually installs it**:
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, confirms `Runyx.exe`
+  landed at `%LOCALAPPDATA%\Programs\Runyx\Runyx.exe` and that
+  `Runyx.exe version` runs, then silently uninstalls it and confirms
+  it's gone. A real install/uninstall round trip on genuine Windows,
+  automated, every push -- not just "it compiled." `runyx.iss` itself
+  gained `/DMyAppVersion=`/`/DSourceExe=` overrides (so CI can pass the
+  commit-based CI version and point at wherever it built the exe) and
+  an `OutputBaseFilename` that actually includes the version
+  (`Runyx-{#MyAppVersion}-Installer`), matching what was asked for
+  literally.
+- **macOS (`scripts/package/macos-release.sh`, now also builds a
+  `.pkg`)**: added a `pkgbuild --component Runyx.app --install-location
+  /Applications ...` step after the existing `.app` build -- `pkgbuild`
+  ships with Xcode command line tools, already present on the
+  `darwin-release` job's runners, no new dependency. Produces
+  `Runyx-<version>-Installer-<arch>.pkg`, the macOS equivalent of a
+  Windows installer: double-click, click through Installer.app's
+  wizard, Runyx is in `/Applications`. `darwin-release`'s CI job now
+  **actually installs it** too: `sudo installer -pkg ... -target /`,
+  confirms `/Applications/Runyx.app` exists and `Runyx version` runs
+  from inside it, then removes it -- the same real-install-round-trip
+  rigor as Windows, on genuine macOS hardware/VMs (`macos-13` Intel,
+  `macos-14` Apple Silicon).
+- **Version string sanitization, both platforms**: CI builds pass a
+  free-form `ci-<sha>` version (so `runyx version` shows the exact
+  commit), but a Windows/macOS installer's own version metadata
+  doesn't accept that format as cleanly as a `.deb`'s does (Debian's
+  hard rejection of a non-digit-led version is what originally
+  surfaced this exact class of bug for Linux, fixed in the entry right
+  above this one) -- `macos-release.sh` picked up the same
+  digit-prefixed `PKG_VERSION` fallback pattern (`0.0.0` for a non-
+  numeric input) `linux-release.sh` already uses, and the
+  `windows-installer` CI job passes a clean `0.0.0-ci` as
+  `MyAppVersion` for the same reason, independent of the full
+  `ci-<sha>` string baked into the binary via `-ldflags`.
+- **Not done here**: nothing about this was run by a human on a real
+  screen -- the CI jobs prove the install mechanics work (files land
+  where they should, the binary runs, uninstall is clean), not that
+  the installer wizard *looks* right or that Start Menu/Dock entries
+  actually open the app when clicked. `docs/MANUAL_TESTS.md` items 25
+  and 31-32 are exactly that remaining by-eye checklist.
+
+## 2026-10-26 — `darwin-release`'s Intel (macos-13) leg dropped: a real CI capacity problem, not a code bug
+
+The PR's CI run showed every job green except `darwin-release
+(macos-13, amd64)`, which sat `queued` for a full 24 hours with no
+runner ever picked up, then GitHub cancelled it and the whole
+workflow run along with it (a queued job that long is past GitHub's
+own timeout, not this job doing anything wrong). That's a runner-pool
+availability problem on this account/repo for the `macos-13` label,
+not a flake to retry past and not something the workflow or the
+packaging script caused -- `darwin-release (macos-14, arm64)` on the
+very same run, same commit, started within seconds and passed
+end to end (build, `.pkg`, real `installer -pkg` install, smoke test).
+
+Rather than guess at another Intel-capable runner label without being
+able to confirm it's actually available on this account (another
+24-hour stall would cost a full day to find out), `darwin-release`'s
+matrix was removed and the job now just runs on `macos-14` (Apple
+Silicon) directly, no `amd64` leg. This means:
+
+- `runyx-darwin-arm64.zip` and the `Runyx-<version>-Installer-arm64.pkg`
+  installer are still built and installed-and-verified for real on
+  every push, exactly as before.
+- **No `darwin-amd64`/Intel `Runyx.app` or installer is built by CI
+  right now.** `scripts/package/macos-release.sh` itself is
+  architecture-agnostic (it just builds for `go env GOARCH`, whatever
+  that is on the machine running it) -- an Intel Mac, or a CI runner
+  on a label this account's plan actually has capacity for, can still
+  produce one by running the script directly. Re-adding an automated
+  Intel leg needs someone who can check (or has access to adjust) this
+  account's actual GitHub Actions runner availability, which this
+  session cannot do from here.
+- `cross-compile (darwin, amd64)` (the plain `CGO_ENABLED=0`
+  static-binary job, no window) is unaffected -- that one already runs
+  fine on `ubuntu-latest`, since it doesn't need cgo/Cocoa at all.
+
+## 2026-10-26 — Branded, configuring installers on every OS, not just plumbing
+
+Follow-up to the three plain installers above: "a setup with custom UI
+that installs Runyx, configures it." All three already worked
+mechanically (CI proved real install/uninstall round trips); what was
+missing was Runyx's own branding on the wizard itself, and actual
+configuration choices beyond "copy the file."
+
+- **Windows (`runyx.iss`)**: `WizardImageFile`/`WizardSmallImageFile`
+  now point at `installer-assets/WizardImage.bmp` (164x314) and
+  `WizardSmallImage.bmp` (55x58) -- the same mascot the taskbar icon
+  uses, rendered onto Runyx's own navy (`#1B2233`) with `rsvg-convert`
+  + ImageMagick (`-filter point` on the resizes so the pixel art stays
+  crisp instead of blurring), plus a custom `[Messages]` welcome
+  page text, instead of Inno Setup's generic default banner/text. Three
+  real configuration tasks were added, not just the pre-existing
+  desktop-icon checkbox: **start Runyx at sign-in** (adds a shortcut to
+  `{userstartup}`) and **add Runyx to PATH** (a `[Code]` Pascal
+  section that read-modify-writes `HKCU\Environment\Path`, the
+  standard Inno Setup idiom for a per-user PATH entry, with matching
+  cleanup in `CurUninstallStepChanged`). `.github/workflows/ci.yml`'s
+  `windows-installer` job now silently installs with
+  `/TASKS=desktopicon,startupicon,addtopath` and actually checks all
+  three configuration effects landed (the desktop/startup `.lnk`
+  files exist, `HKCU`'s `Path` contains the install dir) *and* that
+  uninstall cleanly reverses every one of them -- not just that
+  `Runyx.exe` got copied.
+- **macOS (`macos-release.sh`)**: upgraded from a bare `pkgbuild`
+  component package to a `productbuild` distribution package --
+  `pkgbuild` still builds the underlying component, but it's now
+  wrapped with a `distribution.xml` that points
+  `installer-gui-script` at a branded welcome page
+  (`installer-assets-mac/welcome.html`) and background image
+  (`installer-assets-mac/background.png`, the same mascot-on-navy
+  treatment as the Windows wizard image, generated the same way),
+  so Installer.app shows Runyx's own branding instead of a bare
+  generic page. `darwin-release`'s existing `installer -pkg ...
+  -target /` smoke test exercises this unchanged, since the resulting
+  `.pkg` installs identically either way -- this is purely the
+  installer's visual presentation, not a change to what it does.
+- **Linux (`.deb`/Arch, `postinstall.sh`)**: dpkg/pacman are
+  command-line tools with no GUI of their own, so there's no
+  equivalent of a graphical wizard to brand here -- the realistic
+  ceiling is a message printed right after install. `nfpm.yaml` gained
+  a `scripts.postinstall` pointing at a new `postinstall.sh`, which
+  nfpm turns into both dpkg's `postinst` and pacman's `.INSTALL`
+  post_install hook from one script: a small ANSI-block-character
+  rendering of the mascot (no image-in-terminal protocol is
+  universal, but ANSI 256-color is) in the same navy/blue/cream
+  palette, followed by exactly how to actually start Runyx
+  (`runyx`, `runyx doctor`, `runyx serve`). **Actually run, not just
+  written**: installed the rebuilt `.deb` with `dpkg -i` on this
+  sandbox and watched the welcome message print for real during
+  `Setting up runyx (...)`.  Found and fixed a real bug doing this:
+  nfpm resolves a relative `scripts.postinstall` path against the
+  *current working directory*, not `nfpm.yaml`'s own directory, so
+  `./postinstall.sh` only worked once `linux-release.sh` was changed
+  to `cd` into `scripts/package/` before invoking `nfpm package` (it
+  previously ran from the repo root). `.github/workflows/ci.yml`'s
+  `linux-release` job now also greps the real `dpkg -i` output for
+  "Runyx is installed" so a future regression here fails loudly
+  instead of silently losing the welcome message. The same
+  `postinstall.sh` is copied into the plain tarball's `install.sh`
+  too, for anyone installing that instead of a real package.
+- **Not done**: a GUI wrapper for the Linux install path (a `.run`
+  self-extracting script with a `zenity`/Qt first-run dialog) was
+  considered and skipped as disproportionate effort for a "nice to
+  have" beyond what dpkg/pacman already give every Linux user by
+  convention (a terminal they just used to install it in the first
+  place).
+
+## 2026-11-21 — Clipboard paste for attachments (web Composer)
+
+`FEATURES.md`'s item 17 had drifted from the actual code: drag-and-drop
+onto the Composer was already fully implemented
+(`onDragEnter`/`onDragOver`/`onDragLeave`/`onDrop`, a real drop-overlay),
+but the note still said "not implemented" for both drag-and-drop *and*
+paste. Fixed the stale claim and closed the real gap: a `paste` handler
+on the textarea now checks `ClipboardEvent.clipboardData.items` for any
+`kind === "file"` entries (a pasted screenshot, or a file copied from
+the OS file manager) and routes them through the exact same
+`addFiles`/`api.uploadAttachment` pipeline the file picker and
+drag-and-drop already use -- `preventDefault()` only fires when a file
+was actually found, so ordinary text paste is untouched. `npm run
+check` (svelte-check), `npm run build`, and `npm test` all pass; there
+is no component-level test harness in `web/` yet (only `api.test.ts`
+exists), so this is verified the same way the pre-existing
+drag-and-drop code was: build + typecheck clean, not an automated DOM
+paste-event test.
+
+## 2026-11-21 — Two real bugs in `cmd_gui.go`/`guiwindow`, found by review
+
+A code review of the `gui-window` branch surfaced two genuine
+correctness bugs in the native-window startup path, both fixed here:
+
+1. **The daemon could be torn down before the browser tab it was
+   serving even loaded.** `guiwindow.Open`'s own doc comment said the
+   default-browser fallback tier "returns immediately" with "nothing to
+   block on" -- true for `openDefaultBrowser` itself, but `cmdGUI` calls
+   `defer stopDaemon()` right after `Open` returns, so on any machine
+   that falls all the way through to that tier (no cgo/native webview
+   build, no Edge/Chrome/Chromium for app-mode), the daemon's context
+   was cancelled and shut down within microseconds of the OS being
+   asked to open a tab -- before that tab could possibly finish
+   loading. Fixed by having `Open` itself block on SIGINT/SIGTERM after
+   the default-browser tier succeeds (the same pattern `runyx serve`
+   already uses via `signal.NotifyContext`), so the daemon now lives
+   exactly as long as "open this URL and keep serving it" requires,
+   with no change to the native/app-mode tiers (which already block
+   correctly on window/process close).
+2. **A daemon startup failure was silently replaced with a generic 10s
+   timeout.** `ensureDaemonRunning` started `d.Serve(ctx)` in a
+   goroutine and only read its result (on the buffered `done` channel)
+   *after* `waitForDaemon` gave up -- so if `net.Listen` failed
+   immediately (e.g. the configured port is already bound by something
+   else), the real error sat unread on `done` while the readiness
+   poller spent the full 10 seconds hitting a daemon that would never
+   answer, then reported "timed out waiting for daemon to become
+   ready" instead of the actual cause. Fixed by racing the readiness
+   poll against `done` with a `select`, so a daemon that exits before
+   becoming ready is reported immediately with its real error.
+   `TestEnsureDaemonRunningFailsFastWhenPortInUse` (binds the port
+   first, then asserts `ensureDaemonRunning` returns in well under the
+   10s timeout) guards the fix; `go test -race ./...` is green across
+   the whole repo.
+
+## 2026-11-21 — A second review pass on the same code found two more real bugs
+
+Re-reviewing `cmd_gui.go`/`guiwindow` after the entry above (itself
+written in response to a review) turned up two further genuine
+issues, one of them a regression introduced by that very fix:
+
+1. **The SIGINT/SIGTERM wait added above can now hang forever on a
+   headless Linux box.** Bare `runyx` always tries to open a GUI
+   window (see `main.go`'s own comment: that's the whole point of this
+   being "a real application" rather than something you have to
+   remember flags for). On a machine with no native webview build and
+   no browser installed for app-mode, `openDefaultBrowser` tries
+   `xdg-open`. In a container or CI image that happens to have
+   `desktop-file-utils` installed (common — it's a transitive
+   dependency of several things) but no actual X11/Wayland session,
+   `xdg-open url` still starts successfully (`cmd.Start()` only checks
+   that *launching* the process worked) and does nothing useful, while
+   `Open` now blocks on `waitForInterrupt()` with no human or window
+   ever able to send it a signal. Fixed by checking for a real display
+   session (`DISPLAY`/`WAYLAND_DISPLAY`) before even attempting
+   `xdg-open` on Linux/BSD, failing fast with a clear error instead --
+   Windows/macOS need no such check, since `start`/`open` both require
+   a real logged-in GUI session to do anything at all, with no
+   equivalent env var to probe.
+2. **The single-instance lock could be stolen out from under a
+   slow-starting instance.** `acquireSingleInstance` treated *any*
+   unreachable-daemon lock file as stale and safe to steal.
+   `ensureDaemonRunning` legitimately allows up to 10s for a daemon to
+   become ready, and the lock file is created well before that --  so
+   a second `runyx` launched during a first instance's own (slow)
+   startup window would see "lock exists, daemon not reachable yet"
+   and conclude the first instance had crashed, delete its lock, and
+   start its own daemon on the same listen address -- both then racing
+   to bind the same port instead of the second one cleanly printing
+   "Runyx is already running." Fixed with a `staleLockGracePeriod`
+   (15s, deliberately longer than the 10s startup timeout): a lock
+   newer than that is never treated as stale regardless of
+   reachability.  `TestAcquireSingleInstanceDoesNotStealLockDuringStartup`
+   locks in the fix; the pre-existing stale-lock-recovery test now
+   backdates its lock file's mtime past the grace period, since a
+   freshly written one would otherwise (correctly) no longer be
+   recovered.
+
+## 2026-11-21 — Three more small, real fixes from continued review
+
+- **`staleLockGracePeriod` was still too tight.** It only covered
+  `ensureDaemonRunning`'s own 10s readiness poll, not the time
+  `resolveBackendBinary` (up to a 5s fetch-context timeout on a cold
+  cache) and `daemon.New` (runs `hwdetect.Detect()`, which can shell
+  out to `nvidia-smi`/`rocm-smi`) can add *before* that poll even
+  starts. Widened to 30s with a comment admitting the honest limit:
+  this still doesn't cover `hwdetect`'s GPU-tool subprocesses hanging
+  outright, since those have no timeout of their own -- a separate,
+  pre-existing gap.
+- **Android's chat header claimed "Connected" unconditionally.**
+  `RunyxViewModel` has no real connection-state tracking (no
+  heartbeat), so the label never reflected a failed request or a
+  dropped pairing -- it just always said "Connected." Changed it to
+  only ever show a problem ("Connection issue", in the error color)
+  when `chatError` is actually set, reusing the same signal the
+  error banner below the transcript already uses, instead of
+  claiming good health it has no way to verify.
+- **The TUI chat screen's arrow-key and mouse-wheel scroll handlers
+  passed a fabricated `{ count: 10000, ... }` `RowHeights` to
+  `scrollBy`**, which does `O(count)` work internally (a full sum
+  over every row plus a from-end walk) -- so every single keypress or
+  wheel tick paid for a transcript 10000 lines larger than it ever
+  actually is, even in a 20-line conversation. The final scrolled
+  position was always correct regardless (the next `draw()` re-clamps
+  against the real line count), so this was pure wasted work, not a
+  visible bug. Replaced with the real count from the same flat index
+  (`src/selection/selection.ts`'s `buildFlatIndex`) the mouse-selection
+  code already builds and caches every frame.
+
+## 2026-11-21 — Automatic update *checking* (not applying)
+
+Added `internal/update.Checker`: a background loop, started alongside
+the existing idle-eviction loop in `Daemon.StartEvictionLoop`, that
+calls the same `update.CheckLatest` function `runyx update` already
+used manually -- once on startup, then every 6h -- and caches the
+result so `GET /api/runyx/update` can serve it instantly (never
+triggering a live GitHub call from an HTTP request; that would block a
+page load on an external service). The web UI's new Settings "About"
+section reads this to show "Runyx vX is available" with a download
+link, instead of a user having to remember `runyx update` exists.
+
+**Deliberately does not touch the auto-apply gap.** `internal/update`
+already refuses to apply an update automatically because
+`PublicKeyHex` is empty -- no real release signing key exists yet (see
+the original self-update entry above) -- and that refusal stays
+exactly as strict as it was. This change only automates the
+*checking*, which carries none of the supply-chain risk actually
+downloading and replacing the running binary would: it's the same
+"is there something newer" question `runyx update` already asked, now
+asked on a schedule instead of only when a human remembers to run the
+command, with the human still the one who clicks "Download" and runs
+the installer themselves. Automating the actual download+apply step
+stays exactly as blocked as it always was, for exactly the same
+reason.
+
+`isNewerRelease` compares tags as plain strings (after normalizing a
+leading "v", since GitHub release tags conventionally have one and
+`version.Version` never does) rather than parsing semver -- neither
+side is guaranteed to be strict semver in this project (a local build
+is literally the string "dev"), so string comparison is honest about
+what this can actually promise: "this is a different release", not "a
+numerically greater one". `go test -race ./...` is green across the
+whole repo; `npm run check`/`build`/`test` are clean for the web
+change.
+
+## 2026-11-21 — Real CI failure: hwdetect's GPU probes had no timeout
+
+CI failed `TestEnsureDaemonRunningFailsFastWhenPortInUse` for real on
+this PR -- not locally (where `nvidia-smi`/`rocm-smi` simply aren't on
+`$PATH` and `exec.Command` fails instantly with "not found"), but on
+GitHub's own runner, where `ensureDaemonRunning` took 28-33 seconds to
+fail instead of the sub-second it should. The test itself was correct;
+`daemon.New()` -- called synchronously, before that test's own
+race-the-readiness-poll logic even starts -- runs
+`hwdetect.Detect()`, and `internal/hwdetect/gpu.go`'s
+`detectNVIDIA`/`detectAMD`/`detectAppleSilicon` called `exec.Command`
+with no timeout at all. Whatever made the CI runner's probe hang (the
+exact cause wasn't tracked down -- a slow/incomplete driver stub is
+the leading guess, and it doesn't matter which) turned an
+"instant ENOENT" into a real multi-second-per-tool stall, which would
+just as easily hit a real user's machine with a half-installed GPU
+driver stack. This was flagged as a known gap in the stale-lock-margin
+entry above ("a separate, pre-existing gap") and dismissed as
+out of scope at the time; it stopped being theoretical within the same
+session.
+
+Fixed with `gpuProbeTimeout = 3 * time.Second` via
+`exec.CommandContext`, wrapping each of the three vendor-tool calls.
+Verified with a fixture that actually proves the kill works: a fake
+binary that does `exec sleep 30` (not `sleep 30` as a child of a
+shell) -- the first attempt used a plain child process, which stayed
+alive holding the stdout pipe open for the full 30s even after
+`exec.CommandContext` killed the shell on timeout, since killing a
+process never kills its own children. `exec` replaces the shell's
+process image via execve instead of forking, so there's a single real
+process to kill, matching how an actual hung vendor tool behaves.
+`TestEnsureDaemonRunningFailsFastWhenPortInUse`'s own threshold moved
+from 5s to 15s (comfortable margin above the now-real worst case of
+two sequential 3s probes) rather than tightening `gpuProbeTimeout`
+itself to fit an arbitrary test budget.
+
+## 2026-11-21 — The 15s threshold above was still wrong; the test needed to stop timing at all
+
+The `gpuProbeTimeout` fix was correct, but
+`TestEnsureDaemonRunningFailsFastWhenPortInUse` kept failing on CI
+afterward anyway, still at ~30s. GitHub-hosted `ubuntu-latest` runners
+don't have `nvidia-smi` on PATH any more than this sandbox does, so
+`hwdetect.Detect()` was never actually the bottleneck for this specific
+test -- it was a red herring that happened to be a real, worth-fixing
+bug in its own right, confirmed by `internal/hwdetect`'s own new tests
+(`internal/hwdetect` legitimately takes ~16s now, entirely from those
+tests deliberately proving their timeout bound against a fake hanging
+binary -- that's expected, not a regression).
+
+The real reason this test can't make a wall-clock assertion on this CI
+setup: `go test -race ./...` with no `-p 1` runs every package's tests
+as separate, concurrent, race-instrumented processes. On a
+resource-constrained runner, that's enough contention to starve this
+test's own background goroutines (the ones racing `ready` against
+`done` inside `ensureDaemonRunning`) for 20-30+ real seconds --
+independent of whether the code being tested is fast or slow. A
+duration threshold literally cannot distinguish "fixed, but descheduled
+for 25s under load" from "still broken" in that environment, no matter
+where the threshold is set.
+
+Replaced the timing assertion with a content assertion: the fixed code
+path's error always wraps "exited before becoming ready" (the daemon's
+own listen failure); the broken code path's error always says "timed
+out waiting for daemon to become ready" (the generic readiness-poll
+message). That distinction holds regardless of how long either one
+took to actually get scheduled and observed, which is the thing this
+environment can't guarantee. `go test -race ./...` is green across the
+whole repo with this change.
+
+## 2026-11-21 — GPU Saver / CPU Saver: colibri as an alternative backend, not a parallel system
+
+Added a new, opt-in way to serve very large MoE models: colibri
+(https://github.com/JustVugg/colibri) streams the experts a token
+doesn't need straight from disk instead of requiring the whole model
+resident in RAM/VRAM. Design choices, and why:
+
+- **An extra `StartOptions` on the existing `backend.Manager`, not a
+  parallel colibri-specific manager.** `backend.Instance` is already
+  just "ModelName + Port + BaseURL" plus process-lifecycle bookkeeping,
+  and every downstream consumer (the OpenAI/Ollama proxy handlers) only
+  ever talks to `inst.BaseURL` over HTTP — it has no idea what's
+  actually listening there. colibri's own `coli serve` is also
+  OpenAI-compatible with a `/health` endpoint, so it slots into exactly
+  that same contract: `Manager.Start` picks which command to exec
+  (`llama-server ...` or `python3 coli serve ...`) based on
+  `StartOptions.UseColibri`, and everything downstream — eviction, idle
+  timeout, the VRAM budget, the HTTP proxy — is unchanged and shared,
+  not duplicated. `Instance.Engine` records which one actually ran, for
+  honest reporting (`GET /api/runyx/gpu-saver`'s `in_use` field).
+- **`coli import` (GGUF -> colibri's own model-directory format) is
+  never triggered automatically.** Verified against a real downloaded
+  v2.1.0 release: `coli serve --model` expects an already-converted
+  model directory, not a raw `.gguf` path. For a model large enough
+  that GPU Saver is actually recommended, that conversion step can take
+  a long time — running it synchronously inside a chat request's
+  handler would turn an ordinary HTTP request into an unbounded,
+  surprise multi-minute-or-longer hang. `runyx gpu-saver import
+  <model>` is the one explicit, visible place this runs, with the same
+  "real, can take a while, streams its own output" contract `runyx
+  pull` already has for downloads. `ensureInstance`'s colibri decision
+  (`Server.colibriStartOptions`) checks whether the import already
+  happened and silently falls back to llama-server if not, rather than
+  blocking on it — never a regression from today's behavior, since
+  llama-server is exactly what would have run anyway before GPU Saver
+  existed.
+- **Fetched lazily, never at daemon startup.** `cfg.GPUSaverEnabled`
+  only makes `Daemon.New` look for an *already-cached* colibri install
+  (`colibri.Fetcher.CachedLauncher`, no network call) — actually
+  fetching colibri (tens of MB) only happens from `runyx gpu-saver
+  import`, the one place a user asked for it. Mirrors the project's
+  existing rule for `AgentWorkDir`/`InterpreterWorkDir`/web search: an
+  opt-in feature should never surprise anyone with new network traffic
+  or a new subprocess merely from starting the daemon.
+- **The recommendation is a named heuristic, not a guarantee.**
+  `colibri.Recommended` requires both "looks like a known MoE family by
+  name" (`LooksLikeMoE`, matching the families colibri's own README
+  documents: GLM, Mistral-Large, Kimi K3, DeepSeek, MiMo, Qwen3.6/3.8,
+  OLMoE, Inkling) and "doesn't comfortably fit in RAM+VRAM" (a 1.3x
+  headroom margin — a model that merely fits is still better served by
+  llama-server's ordinary GPU offload). Runyx doesn't parse a GGUF's
+  real architecture/`expert_count` metadata yet, so this is a name
+  match, not ground truth — a dense model with "moe" nowhere in its
+  name/repo string won't be *mis-recommended* (the false-negative
+  direction is safe: worst case, someone manually imports a model that
+  wouldn't have helped), but a correctly-named MoE checkpoint under an
+  unusual alias could be under-recommended. Stated honestly rather than
+  presented as more precise than it is; real GGUF metadata parsing is a
+  natural follow-up (see docs/ROADMAP.md).
+- **No live API/UI toggle.** Every other config.toml-only setting in
+  this project (`agent_work_dir`, `interpreter_work_dir`) is edited by
+  hand and read-only from the HTTP API/UI; `config.Save` exists but is
+  never called from a live request handler anywhere in the codebase.
+  `gpu_saver_enabled` follows that same, already-established pattern
+  rather than introducing a new "the server mutates its own config
+  file from an HTTP request" capability that doesn't exist anywhere
+  else yet. The web UI's Settings page and `GET /api/runyx/gpu-saver`
+  are read-only status, same as the "About" update-checker section
+  right above them.
+
+See `docs/BLOCKED.md` for exactly what was and wasn't verified against
+colibri's real release and CLI (a real download and real `--help`
+output, but no real GGUF import/serve end to end — none was available
+in this sandbox) and `docs/USAGE.md` for the user-facing walkthrough.
+`go test -race ./...` is green across the whole repo; `npm run
+check`/`build`/`test` are clean for the web change.

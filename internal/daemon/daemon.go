@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/furaxdev/runyx/internal/agent"
 	"github.com/furaxdev/runyx/internal/approval"
 	"github.com/furaxdev/runyx/internal/automation"
 	"github.com/furaxdev/runyx/internal/backend"
+	"github.com/furaxdev/runyx/internal/colibri"
 	"github.com/furaxdev/runyx/internal/config"
 	"github.com/furaxdev/runyx/internal/history"
 	"github.com/furaxdev/runyx/internal/hwdetect"
@@ -21,6 +23,8 @@ import (
 	"github.com/furaxdev/runyx/internal/modelstore"
 	"github.com/furaxdev/runyx/internal/plugin"
 	"github.com/furaxdev/runyx/internal/remote"
+	"github.com/furaxdev/runyx/internal/update"
+	"github.com/furaxdev/runyx/internal/version"
 	"github.com/furaxdev/runyx/internal/vision"
 	"github.com/furaxdev/runyx/internal/voice"
 )
@@ -67,6 +71,14 @@ type Daemon struct {
 	Plugins   *plugin.Manager
 	Scheduler *automation.Scheduler
 
+	// UpdateChecker periodically checks GitHub for a newer release in
+	// the background (item 30) and caches the result for the HTTP API
+	// to serve instantly. It only ever checks and reports -- never
+	// downloads or applies anything, same as `runyx update` -- see
+	// docs/DECISIONS.md for why automatic apply stays refused until a
+	// real release signing key exists.
+	UpdateChecker *update.Checker
+
 	stopEviction context.CancelFunc
 }
 
@@ -112,9 +124,24 @@ func New(cfg config.Config, backendBinary string) (*Daemon, error) {
 	if piperBin, err := exec.LookPath("piper"); err == nil {
 		d.Synthesizer = &voice.Synthesizer{BinaryPath: piperBin}
 	}
+	if cfg.GPUSaverEnabled {
+		// Only ever resolve an already-cached colibri install here --
+		// never fetch over the network from inside daemon startup; see
+		// colibri.Fetcher.CachedLauncher's own doc comment for why.
+		// Nothing found just means GPU Saver stays recommended-but-
+		// unavailable until `runyx gpu-saver import` fetches it.
+		fetcher := colibri.NewFetcher(filepath.Join(cfg.BackendsDir, "colibri"))
+		if launcherPath, ok := fetcher.CachedLauncher(hw); ok {
+			if pythonPath, err := colibri.FindPython(); err == nil {
+				mgr.ColibriPython = pythonPath
+				mgr.ColibriLauncher = launcherPath
+			}
+		}
+	}
 	d.Remote = &remote.Router{Providers: map[string]remote.Provider{}}
 	d.Plugins = plugin.NewManager()
 	d.Scheduler = automation.NewScheduler()
+	d.UpdateChecker = update.NewChecker(version.Version)
 
 	d.Approvals = approval.NewQueue()
 	if cfg.AgentWorkDir != "" {
@@ -149,11 +176,16 @@ func approvalAdapter(q *approval.Queue) agent.ApprovalFunc {
 }
 
 // StartEvictionLoop begins periodically evicting idle models until ctx is
-// cancelled or Stop is called.
+// cancelled or Stop is called. Also starts the background update
+// checker (item 30) on the same lifecycle -- both are "run until
+// Shutdown" background loops with nothing OS-request-specific about
+// them, so they share this entry point rather than each needing their
+// own Start call threaded through Serve.
 func (d *Daemon) StartEvictionLoop(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	d.stopEviction = cancel
 	d.Scheduler.Start()
+	d.UpdateChecker.Start(ctx)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -176,6 +208,7 @@ func (d *Daemon) Shutdown() {
 	if d.stopEviction != nil {
 		d.stopEviction()
 	}
+	d.UpdateChecker.Stop()
 	d.Scheduler.Stop()
 	d.Plugins.StopAll()
 	d.Manager.StopAll()

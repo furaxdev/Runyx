@@ -11,14 +11,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/furaxdev/runyx/internal/colibri"
 	"github.com/furaxdev/runyx/internal/modelstore"
 )
 
-// Instance is one running llama-server subprocess backing a loaded model.
+// Instance is one running llama-server (or colibri) subprocess backing
+// a loaded model.
 type Instance struct {
 	ModelName string
 	Port      int
 	BaseURL   string
+	// Engine names which subprocess is actually serving this instance:
+	// "llama-server" or "colibri" (see StartOptions.UseColibri).
+	Engine string
 
 	cmd      *exec.Cmd
 	exited   chan error // cmd.Wait()'s result; see the comment in Manager.Start
@@ -49,9 +54,39 @@ type Manager struct {
 	VRAMBudgetMB  int // 0 = unlimited
 	PortRangeFrom int
 
+	// ColibriPython and ColibriLauncher, when both set, make Start able
+	// to launch a model via colibri ("GPU Saver"/"CPU Saver" — see
+	// internal/colibri's package doc) instead of llama-server, when a
+	// caller's StartOptions.UseColibri asks for it. Left empty (the
+	// default), every Start behaves exactly as before: colibri was
+	// never fetched, or GPU Saver is off.
+	ColibriPython   string
+	ColibriLauncher string
+
 	mu        sync.Mutex
 	instances map[string]*Instance
 	startMu   map[string]*sync.Mutex // per-model lock serializing concurrent cold starts
+}
+
+// StartOptions customizes how Start launches an instance, beyond the
+// model and its tuning. The zero value launches llama-server exactly
+// as before GPU Saver existed.
+type StartOptions struct {
+	// UseColibri launches the model via colibri instead of
+	// llama-server. Requires Manager.ColibriPython/ColibriLauncher to
+	// be set and ColibriModelDir to name an already-imported model
+	// directory (see colibri.ImportedModelDir) — Start returns a clear
+	// error rather than silently falling back to llama-server if
+	// either precondition isn't met, since that fallback would quietly
+	// defeat the reason GPU Saver was requested in the first place (the
+	// model not fitting in llama-server's own memory budget).
+	UseColibri      bool
+	ColibriModelDir string
+	// APIKey is forwarded to colibri's own --api-key flag. Runyx's
+	// device-token auth already sits in front of this instance (see
+	// internal/daemon), so this is defense in depth, not the only
+	// thing guarding it.
+	APIKey string
 }
 
 // NewManager returns a Manager that launches BinaryPath for each model.
@@ -98,10 +133,11 @@ func (m *Manager) List() []*Instance {
 	return out
 }
 
-// Start launches llama-server for mdl with the given tuning parameters,
-// evicting idle/LRU instances first if the VRAM budget requires it. It
-// blocks until the server's /health endpoint responds or ctx is done.
-func (m *Manager) Start(ctx context.Context, mdl modelstore.Model, tuning modelstore.TuningParams) (*Instance, error) {
+// Start launches llama-server (or, with opts.UseColibri, colibri) for
+// mdl with the given tuning parameters, evicting idle/LRU instances
+// first if the VRAM budget requires it. It blocks until the server's
+// /health endpoint responds or ctx is done.
+func (m *Manager) Start(ctx context.Context, mdl modelstore.Model, tuning modelstore.TuningParams, opts StartOptions) (*Instance, error) {
 	// Serialize concurrent cold starts for the SAME model name: without
 	// this, two concurrent first requests could both see an empty slot,
 	// both launch a subprocess, and the later map write would orphan
@@ -130,19 +166,33 @@ func (m *Manager) Start(ctx context.Context, mdl modelstore.Model, tuning models
 		return nil, fmt.Errorf("find free port: %w", err)
 	}
 
-	args := serverArgs(mdl.File, port, tuning)
+	engineName := "llama-server"
+	var cmd *exec.Cmd
+	if opts.UseColibri {
+		engineName = "colibri"
+		if m.ColibriPython == "" || m.ColibriLauncher == "" {
+			return nil, fmt.Errorf("GPU Saver (colibri) was requested for %q but colibri isn't available on this daemon yet (see docs/USAGE.md)", mdl.Name)
+		}
+		if opts.ColibriModelDir == "" {
+			return nil, fmt.Errorf("GPU Saver (colibri) was requested for %q but it hasn't been imported yet (coli import)", mdl.Name)
+		}
+		prog, args := colibri.ServeCommand(m.ColibriPython, m.ColibriLauncher, opts.ColibriModelDir, port, mdl.Name, opts.APIKey)
+		cmd = exec.CommandContext(context.Background(), prog, args...) // outlives request ctx
+	} else {
+		args := serverArgs(mdl.File, port, tuning)
+		cmd = exec.CommandContext(context.Background(), m.BinaryPath, args...) // outlives request ctx
+	}
 
-	cmd := exec.CommandContext(context.Background(), m.BinaryPath, args...) // outlives request ctx
 	// Captured so a startup failure (crash, missing shared library, bad
 	// flag) is diagnosable from the error alone — without this, Stdout/
 	// Stderr are nil and Go silently sends them to /dev/null, so
-	// "did not become healthy" looked identical whether llama-server was
+	// "did not become healthy" looked identical whether the engine was
 	// still loading or had already died.
 	output := newRingBuffer(8 * 1024)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start llama-server: %w", err)
+		return nil, fmt.Errorf("start %s: %w", engineName, err)
 	}
 
 	// Exactly one goroutine ever calls cmd.Wait() (Go panics on a second
@@ -157,6 +207,7 @@ func (m *Manager) Start(ctx context.Context, mdl modelstore.Model, tuning models
 		ModelName: mdl.Name,
 		Port:      port,
 		BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+		Engine:    engineName,
 		cmd:       cmd,
 		exited:    exited,
 		lastUsed:  time.Now(),
@@ -169,6 +220,14 @@ func (m *Manager) Start(ctx context.Context, mdl modelstore.Model, tuning models
 		out := strings.TrimSpace(output.String())
 		if out == "" {
 			out = "(no output)"
+		}
+		if opts.UseColibri {
+			// diagnoseStartupFailure's advice (libgomp, etc.) is specific
+			// to llama-server's own known failure modes; colibri's are
+			// different and undocumented here, so this just surfaces the
+			// raw captured output rather than guessing at advice that
+			// wouldn't apply.
+			return nil, fmt.Errorf("colibri did not become healthy: %w\ncolibri output:\n%s", err, out)
 		}
 		return nil, fmt.Errorf("llama-server did not become healthy: %w\n%s", err, diagnoseStartupFailure(out))
 	}

@@ -11,8 +11,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/furaxdev/runyx/internal/colibri"
 	"github.com/furaxdev/runyx/internal/convert"
 	"github.com/furaxdev/runyx/internal/history"
+	"github.com/furaxdev/runyx/internal/update"
 	"github.com/furaxdev/runyx/internal/vision"
 	"github.com/furaxdev/runyx/internal/voice"
 )
@@ -24,9 +26,10 @@ import (
 // feature off rather than panicking — e.g. no Transcriber means audio
 // attachments return a clear "not available" error instead of a 500.
 type RunyxExtras struct {
-	History     *history.Store
-	Transcriber *voice.Transcriber // nil if whisper.cpp isn't installed
-	Vision      *vision.Bridge     // nil if no OCR/auxiliary model is configured
+	History       *history.Store
+	Transcriber   *voice.Transcriber // nil if whisper.cpp isn't installed
+	Vision        *vision.Bridge     // nil if no OCR/auxiliary model is configured
+	UpdateChecker *update.Checker    // nil only in tests that don't wire it up
 }
 
 // RegisterRunyx wires Runyx-specific routes onto mux. Call in addition
@@ -43,6 +46,21 @@ func (s *Server) RegisterRunyx(mux *http.ServeMux, extras *RunyxExtras) {
 	mux.HandleFunc("GET /api/runyx/search", extras.handleSearch)
 	mux.HandleFunc("POST /api/runyx/attachments", extras.handleAttachment)
 	mux.HandleFunc("GET /api/runyx/dashboard", s.handleDashboard)
+	mux.HandleFunc("GET /api/runyx/update", extras.handleUpdateCheck)
+	mux.HandleFunc("GET /api/runyx/gpu-saver", s.handleGPUSaverStatus)
+}
+
+// handleUpdateCheck serves the update checker's last cached result
+// instantly -- it never triggers a live GitHub call itself, since that
+// would block a page load on an external service. The background
+// Checker (internal/update.Checker, started by
+// Daemon.StartEvictionLoop) is what actually keeps this fresh.
+func (e *RunyxExtras) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if e.UpdateChecker == nil {
+		writeJSON(w, http.StatusOK, update.CheckResult{})
+		return
+	}
+	writeJSON(w, http.StatusOK, e.UpdateChecker.Result())
 }
 
 func (e *RunyxExtras) requireHistory(w http.ResponseWriter) bool {
@@ -387,4 +405,54 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// GPUSaverStatus is what GET /api/runyx/gpu-saver returns: whether GPU
+// Saver (colibri) is enabled/available on this daemon, and, when a
+// `model` query param names a known model, whether colibri.Recommended
+// thinks it would help and whether it's already been imported (see
+// `runyx gpu-saver import`) and so is actually in use.
+type GPUSaverStatus struct {
+	Enabled   bool `json:"enabled"`   // config.toml's gpu_saver_enabled
+	Available bool `json:"available"` // colibri is actually fetched/usable on this daemon
+	// The rest are only populated when ?model=<name> names a model this
+	// daemon knows about.
+	Recommended bool   `json:"recommended,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Imported    bool   `json:"imported,omitempty"`
+	InUse       bool   `json:"in_use,omitempty"`
+}
+
+func (s *Server) handleGPUSaverStatus(w http.ResponseWriter, r *http.Request) {
+	status := GPUSaverStatus{
+		Enabled:   s.GPUSaverEnabled,
+		Available: s.Manager.ColibriPython != "" && s.Manager.ColibriLauncher != "",
+	}
+	modelName := r.URL.Query().Get("model")
+	if modelName == "" {
+		writeJSON(w, http.StatusOK, status)
+		return
+	}
+	mdl, ok, err := s.Store.Get(modelName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, errModelNotFound(modelName))
+		return
+	}
+	rec := colibri.Recommended(s.HW, mdl.SizeBytes, mdl.Name+" "+mdl.Repo)
+	status.Recommended = rec.Recommended
+	status.Reason = rec.Reason
+	if status.Available {
+		modelDir := colibri.ImportedModelDir(filepath.Dir(s.Manager.ColibriLauncher), filepath.Base(mdl.File))
+		if _, statErr := os.Stat(modelDir); statErr == nil {
+			status.Imported = true
+		}
+	}
+	if inst, ok := s.Manager.Get(mdl.Name); ok {
+		status.InUse = inst.Engine == "colibri"
+	}
+	writeJSON(w, http.StatusOK, status)
 }

@@ -38,3 +38,13 @@ with access to that hardware.
   serve` + pinned by the Android app during pairing, most likely) would
   close the remaining gap: an on-path attacker on the same LAN could
   still observe or tamper with the plaintext traffic today.
+- **Real GGUF architecture metadata for GPU Saver's recommendation.**
+  `colibri.Recommended` (see `docs/DECISIONS.md`, 2026-11-21) currently
+  decides "is this a MoE model" by matching the model's name/repo
+  string against colibri's known-supported families, not by reading
+  the GGUF's own `expert_count`/architecture metadata — Runyx has no
+  GGUF-header parser at all yet. Adding one (even just enough to read
+  `general.architecture` and `*.expert_count`) would make the
+  recommendation a real fact instead of a name-based heuristic, and
+  would likely be useful beyond GPU Saver too (e.g. showing true
+  active-vs-total parameter counts in the Models page).

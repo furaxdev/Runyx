@@ -9,6 +9,8 @@
 
     <application
         android:label="Runyx"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Runyx"
         android:networkSecurityConfig="@xml/network_security_config">
         <!-- The paired PC is always reached over plain http://<lan-ip>:<port>

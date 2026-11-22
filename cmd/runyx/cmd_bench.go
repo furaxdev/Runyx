@@ -49,7 +49,7 @@ func cmdBench(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	inst, err := mgr.Start(ctx, mdl, tuningOrDefault(mdl))
+	inst, err := mgr.Start(ctx, mdl, tuningOrDefault(mdl), backend.StartOptions{})
 	if err != nil {
 		return fmt.Errorf("start model: %w", err)
 	}

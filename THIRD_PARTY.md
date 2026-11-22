@@ -61,6 +61,16 @@ llama.cpp (`llama-server`) is run as an external subprocess, downloaded
 from its official GitHub releases (https://github.com/ggml-org/llama.cpp,
 MIT license); Runyx does not statically or dynamically link against it.
 
+colibri (https://github.com/JustVugg/colibri, Apache-2.0) backs "GPU
+Saver"/"CPU Saver" (see internal/colibri and docs/DECISIONS.md): run as
+an external subprocess (its own Python launcher plus native engine
+binaries), downloaded from its official GitHub releases, off by
+default and never fetched unless a user explicitly enables it and runs
+`runyx gpu-saver import`. Runyx does not statically or dynamically
+link against it, and does not vendor any of its code. Each model
+colibri loads carries its own separate license, same caveat as any
+GGUF Runyx pulls for llama-server.
+
 This file will grow as later milestones add dependencies (Svelte/Vite for
 `web/`, whisper.cpp/Piper bindings for voice, etc.) — update it in the
 same commit that adds a new dependency.
